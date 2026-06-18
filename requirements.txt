@@ -1,0 +1,5 @@
+# Backend gateway deps. This app holds NO detection logic, so NO ultralytics/torch
+# /pillow here — it just relays HTTP/WS to the iacore service.
+fastapi>=0.110
+uvicorn[standard]>=0.29
+httpx>=0.27
