@@ -18,6 +18,10 @@ options/classes calls are proxied so the frontend only ever knows the backend.
 Config via env:
     IACORE_URL    base URL of the iacore service (default http://localhost:8001)
     CORS_ORIGINS  comma-separated allowed origins for the browser (default *)
+    FRONTEND_DIST optional path to a built frontend (dist/); when set, this app
+                  also SERVES that SPA so the app + /api + /ws live on one origin
+                  (used for the single-origin HTTPS deploy, e.g. phone access).
+                  When unset, this app stays a pure gateway.
 
 Run (from the backend repo root, venv active):
     uvicorn app:app --host 0.0.0.0 --port 8000
@@ -29,10 +33,11 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 IACORE_URL = os.environ.get("IACORE_URL", "http://localhost:8001").rstrip("/")
 CORS_ORIGINS = [o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",") if o.strip()]
+FRONTEND_DIST = os.environ.get("FRONTEND_DIST", "").strip()
 
 # One shared async client (keep-alive to iacore). Generous read timeout because
 # the VLM call can take many seconds; the connect timeout stays short.
@@ -155,3 +160,30 @@ async def ws_detect(ws: WebSocket):
                 await ws.send_json({"type": "detections", **d})
     except WebSocketDisconnect:
         pass
+
+
+# --------------------------------------------------------------------------- #
+# Optional: serve a built frontend so the app + /api + /ws share ONE origin.
+# Enabled only when FRONTEND_DIST points at a built SPA dir (set by run-phone.sh
+# for the single-origin HTTPS deploy a phone can reach). This does NOT couple to
+# the frontend repo — it just serves whatever directory it is handed, and is a
+# no-op (pure gateway) when FRONTEND_DIST is unset. Registered LAST so the /api
+# and /ws routes above always take precedence.
+# --------------------------------------------------------------------------- #
+if FRONTEND_DIST and os.path.isdir(FRONTEND_DIST):
+    DIST_ABS = os.path.abspath(FRONTEND_DIST)
+
+    @app.get("/{full_path:path}")
+    async def spa(full_path: str):
+        if full_path.startswith(("api/", "ws/")):
+            return JSONResponse({"detail": "Not Found"}, status_code=404)
+        candidate = os.path.normpath(os.path.join(DIST_ABS, full_path))
+        # Serve a real asset if it exists (and stays inside dist), else fall back
+        # to index.html for client-side routes (React Router).
+        if (
+            full_path
+            and candidate.startswith(DIST_ABS + os.sep)
+            and os.path.isfile(candidate)
+        ):
+            return FileResponse(candidate)
+        return FileResponse(os.path.join(DIST_ABS, "index.html"))
