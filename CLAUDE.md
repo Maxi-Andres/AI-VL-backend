@@ -29,8 +29,11 @@ of this process is the whole point — it stays light and independently deployab
 
 ## Conventions
 
-- **Everything in English** — comments, docstrings, identifiers, user-facing
-  strings, docs.
+- **Everything in English — absolutely everything**: comments, docstrings,
+  identifiers / function names, user-facing strings, config keys, any shell
+  scripts (`*.sh`/`*.ps1`), and the docs/README. The user converses in Spanish
+  (Rioplatense) — that is fine for chat ONLY; never put Spanish into code,
+  scripts, or docs.
 - **NEVER run `git commit` or `git push`.** Make edits, verify, report; the user
   commits.
 

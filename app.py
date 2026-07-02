@@ -148,10 +148,17 @@ class Conn:
 class Hub:
     def __init__(self):
         self.conns: set[Conn] = set()
-        # Shared YOLO config for the session. Any client (phone OR a monitor) can
-        # change it; the change is pushed to every OTHER client so all UIs stay in
-        # sync, and the producer reads it for every frame.
-        self.config = {"model": None, "conf": None, "imgsz": None, "classes": []}
+        # Shared session config. Any client (phone OR a monitor) can change it; the
+        # change is pushed to every OTHER client so all UIs stay in sync. The
+        # producer reads model/conf/imgsz/classes for every frame; `max_fps` is a
+        # client-side capture cap that we only relay (never sent to /detect).
+        self.config = {
+            "model": None,
+            "conf": None,
+            "imgsz": None,
+            "classes": [],
+            "max_fps": None,
+        }
 
     def add(self, conn: Conn) -> None:
         self.conns.add(conn)
@@ -164,7 +171,7 @@ class Hub:
         push the new config to every client except the origin. Only broadcasting
         on a real change is what stops the sync from looping between clients."""
         changed = False
-        for k in ("model", "conf", "imgsz", "classes"):
+        for k in ("model", "conf", "imgsz", "classes", "max_fps"):
             if k in upd and upd[k] is not None and self.config[k] != upd[k]:
                 self.config[k] = upd[k]
                 changed = True
