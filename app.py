@@ -26,6 +26,8 @@ Config via env:
 Run (from the backend repo root, venv active):
     uvicorn app:app --host 0.0.0.0 --port 8000
 """
+import asyncio
+import base64
 import json
 import os
 from contextlib import asynccontextmanager
@@ -102,19 +104,73 @@ async def vlm(payload: dict):
 
 
 # --------------------------------------------------------------------------- #
+# Live session hub: one producer (the phone at /ws/detect) + N read-only
+# monitors (the server screen at /ws/view). The phone already uploads every
+# frame here for detection, so mirroring it to a monitor costs the phone NOTHING
+# extra — the gateway just re-sends the bytes it already has, downstream. And it
+# only does so WHILE a monitor is attached: with no viewers, fan-out is skipped
+# entirely, so an idle monitor uses zero bandwidth.
+# --------------------------------------------------------------------------- #
+class Viewer:
+    """A single monitor connection. Its bounded queue holds only the freshest
+    frame: if the monitor can't keep up, we drop stale frames instead of letting
+    it back-pressure (and slow down) the phone's detection loop."""
+
+    def __init__(self, ws: WebSocket):
+        self.ws = ws
+        self.queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+
+
+class Hub:
+    def __init__(self):
+        self.viewers: set[Viewer] = set()
+        # Shared YOLO config for the session. Whoever changes it last wins — the
+        # phone OR a monitor — and the producer reads it for every frame, so a
+        # monitor can drive detection just like the phone does.
+        self.config = {"model": None, "conf": None, "imgsz": None, "classes": []}
+
+    def apply_config(self, upd: dict) -> None:
+        for k in ("model", "conf", "imgsz", "classes"):
+            if k in upd and upd[k] is not None:
+                self.config[k] = upd[k]
+
+    def fanout(self, jpeg: bytes, det: dict) -> None:
+        if not self.viewers:
+            return  # nobody watching -> no extra bandwidth
+        payload = {
+            "type": "frame",
+            "jpeg_b64": base64.b64encode(jpeg).decode("ascii"),
+            **det,
+        }
+        for v in self.viewers:
+            if v.queue.full():  # drop the stale frame, keep only the newest
+                try:
+                    v.queue.get_nowait()
+                except Exception:
+                    pass
+            try:
+                v.queue.put_nowait(payload)
+            except Exception:
+                pass
+
+
+hub = Hub()
+
+
+# --------------------------------------------------------------------------- #
 # Live YOLO over WebSocket (frames in -> iacore /detect -> boxes out)
 # --------------------------------------------------------------------------- #
 @app.websocket("/ws/detect")
 async def ws_detect(ws: WebSocket):
-    """Per-connection live detection relay.
+    """Producer: the phone streams frames here.
 
     The client sends a JSON text message to (re)configure {model, conf, imgsz,
     classes} and binary JPEG frames. For each frame we POST the bytes to iacore's
     /detect with the current params and relay the JSON reply. The client paces
-    itself (one frame in flight), which throttles to the achievable rate.
+    itself (one frame in flight), which throttles to the achievable rate. Each
+    answered frame is also fanned out to any attached monitors.
     """
     await ws.accept()
-    state = {"model": None, "conf": None, "imgsz": None, "classes": []}
     try:
         while True:
             msg = await ws.receive()
@@ -127,10 +183,8 @@ async def ws_detect(ws: WebSocket):
                     upd = json.loads(text)
                 except json.JSONDecodeError:
                     continue
-                for k in ("model", "conf", "imgsz", "classes"):
-                    if k in upd and upd[k] is not None:
-                        state[k] = upd[k]
-                await ws.send_json({"type": "config", "state": state})
+                hub.apply_config(upd)
+                await ws.send_json({"type": "config", "state": hub.config})
                 continue
 
             data = msg.get("bytes")
@@ -138,14 +192,14 @@ async def ws_detect(ws: WebSocket):
                 continue
 
             params = {}
-            if state["model"]:
-                params["model"] = state["model"]
-            if state["conf"] is not None:
-                params["conf"] = state["conf"]
-            if state["imgsz"] is not None:
-                params["imgsz"] = state["imgsz"]
-            if state["classes"]:
-                params["classes"] = ",".join(state["classes"])
+            if hub.config["model"]:
+                params["model"] = hub.config["model"]
+            if hub.config["conf"] is not None:
+                params["conf"] = hub.config["conf"]
+            if hub.config["imgsz"] is not None:
+                params["imgsz"] = hub.config["imgsz"]
+            if hub.config["classes"]:
+                params["classes"] = ",".join(hub.config["classes"])
 
             try:
                 r = await client.post("/detect", content=data, params=params)
@@ -158,8 +212,51 @@ async def ws_detect(ws: WebSocket):
                 await ws.send_json({"type": "error", "message": d["error"]})
             else:
                 await ws.send_json({"type": "detections", **d})
+                hub.fanout(data, d)
     except WebSocketDisconnect:
         pass
+
+
+# --------------------------------------------------------------------------- #
+# Read-only monitor over WebSocket: mirrors the phone's frames + boxes to a
+# screen on the server, and can push YOLO config changes into the shared
+# session. ATTACHING here is what turns fan-out on; detaching turns it off.
+# --------------------------------------------------------------------------- #
+@app.websocket("/ws/view")
+async def ws_view(ws: WebSocket):
+    await ws.accept()
+    viewer = Viewer(ws)
+    hub.viewers.add(viewer)
+
+    async def sender():
+        try:
+            while True:
+                payload = await viewer.queue.get()
+                await ws.send_json(payload)
+        except Exception:
+            pass
+
+    task = asyncio.create_task(sender())
+    try:
+        # Seed the monitor UI with the current shared config right away.
+        await ws.send_json({"type": "config", "state": hub.config})
+        while True:
+            msg = await ws.receive()
+            if msg.get("type") == "websocket.disconnect":
+                break
+            text = msg.get("text")
+            if text is None:
+                continue  # monitors never send frames, only config
+            try:
+                upd = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            hub.apply_config(upd)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        hub.viewers.discard(viewer)
+        task.cancel()
 
 
 # --------------------------------------------------------------------------- #
