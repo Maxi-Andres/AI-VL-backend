@@ -111,47 +111,81 @@ async def vlm(payload: dict):
 # only does so WHILE a monitor is attached: with no viewers, fan-out is skipped
 # entirely, so an idle monitor uses zero bandwidth.
 # --------------------------------------------------------------------------- #
-class Viewer:
-    """A single monitor connection. Its bounded queue holds only the freshest
-    frame: if the monitor can't keep up, we drop stale frames instead of letting
-    it back-pressure (and slow down) the phone's detection loop."""
+def _put_latest(q: "asyncio.Queue", item) -> None:
+    """Enqueue without ever blocking: if the queue is full, drop the oldest item
+    first. Keeps the freshest data flowing to a slow consumer."""
+    if q.full():
+        try:
+            q.get_nowait()
+        except Exception:
+            pass
+    try:
+        q.put_nowait(item)
+    except Exception:
+        pass
 
-    def __init__(self, ws: WebSocket):
+
+class Conn:
+    """A live-session connection. EVERYONE (phone + monitors) gets a config queue
+    so a config change from any client is pushed to all the others and every UI
+    stays in sync. Monitors additionally get a frame queue (bounded to the single
+    freshest frame) for the video mirror. A per-connection send lock serializes
+    the two sender tasks + the receive loop so their sends never interleave on the
+    same socket."""
+
+    def __init__(self, ws: WebSocket, is_viewer: bool):
         self.ws = ws
-        self.queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+        self.is_viewer = is_viewer
+        self.frame_q = asyncio.Queue(maxsize=1) if is_viewer else None
+        self.config_q: asyncio.Queue = asyncio.Queue(maxsize=8)
+        self.send_lock = asyncio.Lock()
+
+    async def send(self, msg) -> None:
+        async with self.send_lock:
+            await self.ws.send_json(msg)
 
 
 class Hub:
     def __init__(self):
-        self.viewers: set[Viewer] = set()
-        # Shared YOLO config for the session. Whoever changes it last wins — the
-        # phone OR a monitor — and the producer reads it for every frame, so a
-        # monitor can drive detection just like the phone does.
+        self.conns: set[Conn] = set()
+        # Shared YOLO config for the session. Any client (phone OR a monitor) can
+        # change it; the change is pushed to every OTHER client so all UIs stay in
+        # sync, and the producer reads it for every frame.
         self.config = {"model": None, "conf": None, "imgsz": None, "classes": []}
 
-    def apply_config(self, upd: dict) -> None:
+    def add(self, conn: Conn) -> None:
+        self.conns.add(conn)
+
+    def remove(self, conn: Conn) -> None:
+        self.conns.discard(conn)
+
+    def apply_config(self, upd: dict, origin: "Conn | None" = None) -> None:
+        """Merge an update into the shared config; if anything actually changed,
+        push the new config to every client except the origin. Only broadcasting
+        on a real change is what stops the sync from looping between clients."""
+        changed = False
         for k in ("model", "conf", "imgsz", "classes"):
-            if k in upd and upd[k] is not None:
+            if k in upd and upd[k] is not None and self.config[k] != upd[k]:
                 self.config[k] = upd[k]
+                changed = True
+        if changed:
+            msg = {"type": "config", "state": dict(self.config)}
+            for c in self.conns:
+                if c is not origin:
+                    _put_latest(c.config_q, msg)
 
     def fanout(self, jpeg: bytes, det: dict) -> None:
-        if not self.viewers:
-            return  # nobody watching -> no extra bandwidth
-        payload = {
-            "type": "frame",
-            "jpeg_b64": base64.b64encode(jpeg).decode("ascii"),
-            **det,
-        }
-        for v in self.viewers:
-            if v.queue.full():  # drop the stale frame, keep only the newest
-                try:
-                    v.queue.get_nowait()
-                except Exception:
-                    pass
-            try:
-                v.queue.put_nowait(payload)
-            except Exception:
-                pass
+        payload = None
+        for c in self.conns:
+            if not c.is_viewer:
+                continue
+            if payload is None:  # encode once, and only if a monitor is attached
+                payload = {
+                    "type": "frame",
+                    "jpeg_b64": base64.b64encode(jpeg).decode("ascii"),
+                    **det,
+                }
+            _put_latest(c.frame_q, payload)
 
 
 hub = Hub()
@@ -171,7 +205,21 @@ async def ws_detect(ws: WebSocket):
     answered frame is also fanned out to any attached monitors.
     """
     await ws.accept()
+    conn = Conn(ws, is_viewer=False)
+    hub.add(conn)
+
+    async def config_sender():
+        try:
+            while True:
+                await conn.send(await conn.config_q.get())
+        except Exception:
+            pass
+
+    task = asyncio.create_task(config_sender())
     try:
+        # Seed the phone with the current shared config (so it adopts whatever a
+        # monitor may already have set).
+        await conn.send({"type": "config", "state": dict(hub.config)})
         while True:
             msg = await ws.receive()
             if msg.get("type") == "websocket.disconnect":
@@ -183,8 +231,7 @@ async def ws_detect(ws: WebSocket):
                     upd = json.loads(text)
                 except json.JSONDecodeError:
                     continue
-                hub.apply_config(upd)
-                await ws.send_json({"type": "config", "state": hub.config})
+                hub.apply_config(upd, origin=conn)
                 continue
 
             data = msg.get("bytes")
@@ -205,16 +252,19 @@ async def ws_detect(ws: WebSocket):
                 r = await client.post("/detect", content=data, params=params)
                 d = r.json()
             except Exception as e:
-                await ws.send_json({"type": "error", "message": f"iacore unreachable: {e}"})
+                await conn.send({"type": "error", "message": f"iacore unreachable: {e}"})
                 continue
 
             if isinstance(d, dict) and "error" in d:
-                await ws.send_json({"type": "error", "message": d["error"]})
+                await conn.send({"type": "error", "message": d["error"]})
             else:
-                await ws.send_json({"type": "detections", **d})
+                await conn.send({"type": "detections", **d})
                 hub.fanout(data, d)
     except WebSocketDisconnect:
         pass
+    finally:
+        hub.remove(conn)
+        task.cancel()
 
 
 # --------------------------------------------------------------------------- #
@@ -225,21 +275,27 @@ async def ws_detect(ws: WebSocket):
 @app.websocket("/ws/view")
 async def ws_view(ws: WebSocket):
     await ws.accept()
-    viewer = Viewer(ws)
-    hub.viewers.add(viewer)
+    conn = Conn(ws, is_viewer=True)
+    hub.add(conn)
 
-    async def sender():
+    async def frame_sender():
         try:
             while True:
-                payload = await viewer.queue.get()
-                await ws.send_json(payload)
+                await conn.send(await conn.frame_q.get())
         except Exception:
             pass
 
-    task = asyncio.create_task(sender())
+    async def config_sender():
+        try:
+            while True:
+                await conn.send(await conn.config_q.get())
+        except Exception:
+            pass
+
+    tasks = [asyncio.create_task(frame_sender()), asyncio.create_task(config_sender())]
     try:
         # Seed the monitor UI with the current shared config right away.
-        await ws.send_json({"type": "config", "state": hub.config})
+        await conn.send({"type": "config", "state": dict(hub.config)})
         while True:
             msg = await ws.receive()
             if msg.get("type") == "websocket.disconnect":
@@ -251,12 +307,13 @@ async def ws_view(ws: WebSocket):
                 upd = json.loads(text)
             except json.JSONDecodeError:
                 continue
-            hub.apply_config(upd)
+            hub.apply_config(upd, origin=conn)
     except WebSocketDisconnect:
         pass
     finally:
-        hub.viewers.discard(viewer)
-        task.cancel()
+        hub.remove(conn)
+        for t in tasks:
+            t.cancel()
 
 
 # --------------------------------------------------------------------------- #
