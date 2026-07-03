@@ -56,10 +56,11 @@ uvicorn app:app --host 0.0.0.0 --port 8000 --reload
 
 ## Endpoints
 
-| Method | Path           | Purpose                                              |
-|--------|----------------|------------------------------------------------------|
-| WS     | `/ws/detect`   | JPEG frames in → relay to iacore `/detect` → boxes   |
-| POST   | `/api/vlm`     | proxy to iacore `/vlm`                                |
-| GET    | `/api/options` | proxy to iacore `/options`                           |
-| GET    | `/api/classes` | proxy to iacore `/classes`                           |
-| GET    | `/api/health`  | backend liveness + iacore reachability               |
+| Method | Path              | Purpose                                              |
+|--------|-------------------|------------------------------------------------------|
+| WS     | `/ws/detect`      | JPEG frames in → relay to iacore `/detect` → boxes   |
+| POST   | `/api/vlm`        | proxy to iacore `/vlm`                                |
+| POST   | `/api/transcribe` | raw audio bytes in → relay to iacore `/transcribe` → text |
+| GET    | `/api/options`    | proxy to iacore `/options`                           |
+| GET    | `/api/classes`    | proxy to iacore `/classes`                           |
+| GET    | `/api/health`     | backend liveness + iacore reachability               |

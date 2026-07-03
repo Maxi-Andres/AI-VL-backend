@@ -33,9 +33,9 @@ import os
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 IACORE_URL = os.environ.get("IACORE_URL", "http://localhost:8001").rstrip("/")
 CORS_ORIGINS = [o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",") if o.strip()]
@@ -99,6 +99,51 @@ async def vlm(payload: dict):
     try:
         r = await client.post("/vlm", json=payload)
         return JSONResponse(r.json(), status_code=r.status_code)
+    except Exception as e:
+        return JSONResponse({"error": f"iacore unreachable: {e}"}, status_code=502)
+
+
+@app.post("/api/transcribe")
+async def transcribe(request: Request, language: str = "", translate: bool = False):
+    """Speech-to-text proxy: relay the browser's raw audio bytes to iacore's
+    /transcribe (like the /ws/detect frame relay) and return the transcript. No
+    model deps here — this app stays a pure gateway."""
+    data = await request.body()
+    params = {"translate": translate}
+    if language:
+        params["language"] = language
+    try:
+        r = await client.post(
+            "/transcribe",
+            content=data,
+            headers={"Content-Type": request.headers.get("content-type", "application/octet-stream")},
+            params=params,
+        )
+        return JSONResponse(r.json(), status_code=r.status_code)
+    except Exception as e:
+        return JSONResponse({"error": f"iacore unreachable: {e}"}, status_code=502)
+
+
+@app.get("/api/tts/voices")
+async def tts_voices():
+    try:
+        r = await client.get("/tts/voices")
+        return JSONResponse(r.json(), status_code=r.status_code)
+    except Exception as e:
+        return JSONResponse({"error": f"iacore unreachable: {e}"}, status_code=502)
+
+
+@app.post("/api/speak")
+async def speak(payload: dict):
+    """Text-to-speech proxy: relay the synthesized audio (or a JSON error) back to
+    the browser with iacore's own content type. Still no model deps here."""
+    try:
+        r = await client.post("/speak", json=payload)
+        return Response(
+            content=r.content,
+            status_code=r.status_code,
+            media_type=r.headers.get("content-type", "application/octet-stream"),
+        )
     except Exception as e:
         return JSONResponse({"error": f"iacore unreachable: {e}"}, status_code=502)
 
