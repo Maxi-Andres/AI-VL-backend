@@ -35,7 +35,7 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
 IACORE_URL = os.environ.get("IACORE_URL", "http://localhost:8001").rstrip("/")
 CORS_ORIGINS = [o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",") if o.strip()]
@@ -101,6 +101,23 @@ async def vlm(payload: dict):
         return JSONResponse(r.json(), status_code=r.status_code)
     except Exception as e:
         return JSONResponse({"error": f"iacore unreachable: {e}"}, status_code=502)
+
+
+@app.post("/api/vlm/stream")
+async def vlm_stream(payload: dict):
+    """Stream the free-prompt answer through to the browser as it is generated, so
+    the UI can show it live and speak it sentence by sentence. Relays iacore's
+    text chunks unchanged; still no model deps here."""
+
+    async def gen():
+        try:
+            async with client.stream("POST", "/vlm/stream", json=payload) as r:
+                async for chunk in r.aiter_bytes():
+                    yield chunk
+        except Exception as e:
+            yield f"\n[error] iacore unreachable: {e}".encode()
+
+    return StreamingResponse(gen(), media_type="text/plain; charset=utf-8")
 
 
 @app.post("/api/transcribe")
