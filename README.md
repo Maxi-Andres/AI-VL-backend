@@ -35,20 +35,29 @@ Check it can reach iacore: <http://localhost:8000/api/health>.
 
 ## Config (env, see `.env.example`)
 
-| Var            | Default                  | Meaning                                   |
-|----------------|--------------------------|-------------------------------------------|
-| `IACORE_URL`   | `http://localhost:8001`  | base URL of the iacore inference service  |
-| `CORS_ORIGINS` | `*`                      | comma-separated browser origins allowed   |
-| `BACKEND_PORT` | `8000`                   | informational; pass `--port` to uvicorn   |
+| Var             | Default                  | Meaning                                            |
+|-----------------|--------------------------|----------------------------------------------------|
+| `IACORE_URL`    | `http://localhost:8001`  | base URL of the iacore inference service           |
+| `CORS_ORIGINS`  | `*`                      | comma-separated browser origins allowed            |
+| `BACKEND_PORT`  | `8000`                   | informational; pass `--port` to uvicorn            |
+| `FRONTEND_DIST` | (unset)                  | path to the built SPA; when set, served on one origin |
 
 ## Endpoints
 
-| Method | Path           | Purpose                                              |
-|--------|----------------|------------------------------------------------------|
-| WS     | `/ws/detect`   | JPEG frames in → relay to iacore `/detect` → boxes   |
-| POST   | `/api/vlm`     | proxy to iacore `/vlm`                                |
-| GET    | `/api/options` | proxy to iacore `/options`                           |
-| GET    | `/api/classes` | proxy to iacore `/classes`                           |
-| GET    | `/api/health`  | backend liveness + iacore reachability               |
+| Method | Path                | Purpose                                                   |
+|--------|---------------------|-----------------------------------------------------------|
+| WS     | `/ws/detect`        | phone streams JPEG frames in → relay to iacore `/detect` → boxes back |
+| WS     | `/ws/view`          | read-only monitor: mirrors the phone's frames + boxes     |
+| GET    | `/api/health`       | backend liveness + iacore reachability                    |
+| GET    | `/api/options`      | proxy to iacore `/options`                                 |
+| GET    | `/api/classes`      | proxy to iacore `/classes`                                 |
+| POST   | `/api/vlm`          | proxy to iacore `/vlm`                                     |
+| POST   | `/api/vlm/stream`   | streamed VLM answer relay                                  |
+| POST   | `/api/transcribe`   | raw audio in → iacore `/transcribe` → text                |
+| POST   | `/api/speak`        | text → iacore `/speak` → WAV audio                         |
+| GET    | `/api/tts/voices`   | proxy to iacore `/tts/voices` (list neural voices)         |
 
-The browser never talks to iacore directly — only this gateway does.
+When `FRONTEND_DIST` is set, the built SPA is also served here (catch-all), so the
+whole app lives on one origin. The browser never talks to iacore directly — only
+this gateway does. `app.py` runs a session Hub that fans one producer (`/ws/detect`)
+out to N monitors (`/ws/view`).
