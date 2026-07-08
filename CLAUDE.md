@@ -61,6 +61,8 @@ uvicorn app:app --host 0.0.0.0 --port 8000 --reload
 | WS     | `/ws/detect`      | JPEG frames in → relay to iacore `/detect` → boxes   |
 | POST   | `/api/vlm`        | proxy to iacore `/vlm`                                |
 | POST   | `/api/transcribe` | raw audio bytes in → relay to iacore `/transcribe` → text |
+| GET    | `/api/tts/voices` | proxy to iacore `/tts/voices` (list neural voices)   |
+| POST   | `/api/speak`      | proxy to iacore `/speak` → WAV audio (text-to-speech) |
 | GET    | `/api/options`    | proxy to iacore `/options`                           |
 | GET    | `/api/classes`    | proxy to iacore `/classes`                           |
 | GET    | `/api/health`     | backend liveness + iacore reachability               |
