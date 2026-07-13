@@ -29,6 +29,7 @@ Run (from the backend repo root, venv active):
 import asyncio
 import base64
 import json
+import logging
 import os
 from contextlib import asynccontextmanager
 
@@ -36,23 +37,33 @@ import httpx
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from pydantic import BaseModel
 
 IACORE_URL = os.environ.get("IACORE_URL", "http://localhost:8001").rstrip("/")
 CORS_ORIGINS = [o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",") if o.strip()]
 FRONTEND_DIST = os.environ.get("FRONTEND_DIST", "").strip()
 
-# One shared async client (keep-alive to iacore). Generous read timeout because
-# the VLM call can take many seconds; the connect timeout stays short.
-client = httpx.AsyncClient(
-    base_url=IACORE_URL,
-    timeout=httpx.Timeout(connect=5.0, read=320.0, write=30.0, pool=5.0),
-)
+# Log through uvicorn's configured handler so gateway failures land in the same
+# stream as the access logs (uvicorn owns the root logging config).
+logger = logging.getLogger("uvicorn.error")
+
+# One shared async client (keep-alive to iacore), built in the lifespan and closed
+# on shutdown. Generous read timeout because the VLM call can take many seconds;
+# the connect timeout stays short.
+client: httpx.AsyncClient
 
 
 @asynccontextmanager
 async def lifespan(app):
-    yield
-    await client.aclose()
+    global client
+    client = httpx.AsyncClient(
+        base_url=IACORE_URL,
+        timeout=httpx.Timeout(connect=5.0, read=320.0, write=30.0, pool=5.0),
+    )
+    try:
+        yield
+    finally:
+        await client.aclose()
 
 
 app = FastAPI(title="backend — gateway", lifespan=lifespan)
@@ -65,6 +76,46 @@ app.add_middleware(
 
 
 # --------------------------------------------------------------------------- #
+# Request models. The gateway only relays, so fields are optional and forwarded
+# with exclude_none=True — iacore applies its own config.json defaults. Typed
+# bodies still reject malformed input at the edge (422) instead of deep in a call.
+# --------------------------------------------------------------------------- #
+class VlmRequest(BaseModel):
+    image: str = ""
+    model: str | None = None
+    scope: str | None = None
+    variant: str | None = None
+    max_tokens: int | None = None
+    num_ctx: int | None = None
+    think: bool | None = None
+    prompt: str | None = None
+
+
+class VlmStreamRequest(BaseModel):
+    image: str = ""
+    prompt: str = ""
+    model: str | None = None
+    max_tokens: int | None = None
+    num_ctx: int | None = None
+
+
+class SpeakRequest(BaseModel):
+    text: str = ""
+    voice: str | None = None
+
+
+async def proxy_json(call):
+    """Await a downstream httpx call and relay its JSON body + status. Map any
+    transport failure to a 502 with a clear message (and log it server-side)."""
+    try:
+        r = await call
+    except Exception as e:
+        logger.warning("iacore unreachable: %s", e)
+        return JSONResponse({"error": f"iacore unreachable: {e}"}, status_code=502)
+    return JSONResponse(r.json(), status_code=r.status_code)
+
+
+# --------------------------------------------------------------------------- #
 # Plain proxies (the frontend only ever talks to the backend)
 # --------------------------------------------------------------------------- #
 @app.get("/api/health")
@@ -73,48 +124,40 @@ async def health():
         r = await client.get("/health")
         return {"backend": "ok", "iacore": r.json()}
     except Exception as e:
+        logger.warning("iacore health check failed: %s", e)
         return JSONResponse({"backend": "ok", "iacore_error": str(e)}, status_code=502)
 
 
 @app.get("/api/options")
 async def options():
-    try:
-        r = await client.get("/options")
-        return JSONResponse(r.json(), status_code=r.status_code)
-    except Exception as e:
-        return JSONResponse({"error": f"iacore unreachable: {e}"}, status_code=502)
+    return await proxy_json(client.get("/options"))
 
 
 @app.get("/api/classes")
 async def classes(model: str = ""):
-    try:
-        r = await client.get("/classes", params={"model": model})
-        return JSONResponse(r.json(), status_code=r.status_code)
-    except Exception as e:
-        return JSONResponse({"error": f"iacore unreachable: {e}"}, status_code=502)
+    return await proxy_json(client.get("/classes", params={"model": model}))
 
 
 @app.post("/api/vlm")
-async def vlm(payload: dict):
-    try:
-        r = await client.post("/vlm", json=payload)
-        return JSONResponse(r.json(), status_code=r.status_code)
-    except Exception as e:
-        return JSONResponse({"error": f"iacore unreachable: {e}"}, status_code=502)
+async def vlm(req: VlmRequest):
+    return await proxy_json(client.post("/vlm", json=req.model_dump(exclude_none=True)))
 
 
 @app.post("/api/vlm/stream")
-async def vlm_stream(payload: dict):
+async def vlm_stream(req: VlmStreamRequest):
     """Stream the free-prompt answer through to the browser as it is generated, so
     the UI can show it live and speak it sentence by sentence. Relays iacore's
     text chunks unchanged; still no model deps here."""
 
     async def gen():
         try:
-            async with client.stream("POST", "/vlm/stream", json=payload) as r:
+            async with client.stream(
+                "POST", "/vlm/stream", json=req.model_dump(exclude_none=True)
+            ) as r:
                 async for chunk in r.aiter_bytes():
                     yield chunk
         except Exception as e:
+            logger.warning("iacore /vlm/stream failed: %s", e)
             yield f"\n[error] iacore unreachable: {e}".encode()
 
     return StreamingResponse(gen(), media_type="text/plain; charset=utf-8")
@@ -129,39 +172,34 @@ async def transcribe(request: Request, language: str = "", translate: bool = Fal
     params = {"translate": translate}
     if language:
         params["language"] = language
-    try:
-        r = await client.post(
+    return await proxy_json(
+        client.post(
             "/transcribe",
             content=data,
             headers={"Content-Type": request.headers.get("content-type", "application/octet-stream")},
             params=params,
         )
-        return JSONResponse(r.json(), status_code=r.status_code)
-    except Exception as e:
-        return JSONResponse({"error": f"iacore unreachable: {e}"}, status_code=502)
+    )
 
 
 @app.get("/api/tts/voices")
 async def tts_voices():
-    try:
-        r = await client.get("/tts/voices")
-        return JSONResponse(r.json(), status_code=r.status_code)
-    except Exception as e:
-        return JSONResponse({"error": f"iacore unreachable: {e}"}, status_code=502)
+    return await proxy_json(client.get("/tts/voices"))
 
 
 @app.post("/api/speak")
-async def speak(payload: dict):
+async def speak(req: SpeakRequest):
     """Text-to-speech proxy: relay the synthesized audio (or a JSON error) back to
     the browser with iacore's own content type. Still no model deps here."""
     try:
-        r = await client.post("/speak", json=payload)
+        r = await client.post("/speak", json=req.model_dump(exclude_none=True))
         return Response(
             content=r.content,
             status_code=r.status_code,
             media_type=r.headers.get("content-type", "application/octet-stream"),
         )
     except Exception as e:
+        logger.warning("iacore /speak failed: %s", e)
         return JSONResponse({"error": f"iacore unreachable: {e}"}, status_code=502)
 
 
@@ -179,11 +217,11 @@ def _put_latest(q: "asyncio.Queue", item) -> None:
     if q.full():
         try:
             q.get_nowait()
-        except Exception:
+        except asyncio.QueueEmpty:
             pass
     try:
         q.put_nowait(item)
-    except Exception:
+    except asyncio.QueueFull:
         pass
 
 
@@ -260,6 +298,19 @@ class Hub:
 hub = Hub()
 
 
+async def _pump(conn: Conn, queue: "asyncio.Queue") -> None:
+    """Forward everything from a per-connection queue to the socket until the task
+    is cancelled or the socket dies. Cancellation propagates; anything else (e.g. a
+    send on a closed socket) ends the loop quietly."""
+    try:
+        while True:
+            await conn.send(await queue.get())
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.debug("sender loop stopped: %s", e)
+
+
 # --------------------------------------------------------------------------- #
 # Live YOLO over WebSocket (frames in -> iacore /detect -> boxes out)
 # --------------------------------------------------------------------------- #
@@ -277,14 +328,7 @@ async def ws_detect(ws: WebSocket):
     conn = Conn(ws, is_viewer=False)
     hub.add(conn)
 
-    async def config_sender():
-        try:
-            while True:
-                await conn.send(await conn.config_q.get())
-        except Exception:
-            pass
-
-    task = asyncio.create_task(config_sender())
+    task = asyncio.create_task(_pump(conn, conn.config_q))
     try:
         # Seed the phone with the current shared config (so it adopts whatever a
         # monitor may already have set).
@@ -321,6 +365,7 @@ async def ws_detect(ws: WebSocket):
                 r = await client.post("/detect", content=data, params=params)
                 d = r.json()
             except Exception as e:
+                logger.warning("iacore /detect failed: %s", e)
                 await conn.send({"type": "error", "message": f"iacore unreachable: {e}"})
                 continue
 
@@ -334,6 +379,7 @@ async def ws_detect(ws: WebSocket):
     finally:
         hub.remove(conn)
         task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -347,21 +393,10 @@ async def ws_view(ws: WebSocket):
     conn = Conn(ws, is_viewer=True)
     hub.add(conn)
 
-    async def frame_sender():
-        try:
-            while True:
-                await conn.send(await conn.frame_q.get())
-        except Exception:
-            pass
-
-    async def config_sender():
-        try:
-            while True:
-                await conn.send(await conn.config_q.get())
-        except Exception:
-            pass
-
-    tasks = [asyncio.create_task(frame_sender()), asyncio.create_task(config_sender())]
+    tasks = [
+        asyncio.create_task(_pump(conn, conn.frame_q)),
+        asyncio.create_task(_pump(conn, conn.config_q)),
+    ]
     try:
         # Seed the monitor UI with the current shared config right away.
         await conn.send({"type": "config", "state": dict(hub.config)})
@@ -383,6 +418,7 @@ async def ws_view(ws: WebSocket):
         hub.remove(conn)
         for t in tasks:
             t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 # --------------------------------------------------------------------------- #
