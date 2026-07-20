@@ -104,6 +104,14 @@ class SpeakRequest(BaseModel):
     voice: str | None = None
 
 
+class CommandRequest(BaseModel):
+    text: str = ""
+    image: str | None = None
+    model: str | None = None
+    num_ctx: int | None = None
+    max_tokens: int | None = None
+
+
 async def proxy_json(call):
     """Await a downstream httpx call and relay its JSON body + status. Map any
     transport failure to a 502 with a clear message (and log it server-side)."""
@@ -161,6 +169,19 @@ async def vlm_stream(req: VlmStreamRequest):
             yield f"\n[error] iacore unreachable: {e}".encode()
 
     return StreamingResponse(gen(), media_type="text/plain; charset=utf-8")
+
+
+@app.post("/api/command")
+async def command(req: CommandRequest):
+    """Unitree G1 command interpreter proxy: relay the transcribed text to iacore's
+    /command and return the chosen skill JSON. No model deps here — pure gateway."""
+    return await proxy_json(client.post("/command", json=req.model_dump(exclude_none=True)))
+
+
+@app.get("/api/skills")
+async def skills():
+    """Proxy the G1 skill catalog so the UI can show the available skills/params."""
+    return await proxy_json(client.get("/skills"))
 
 
 @app.post("/api/transcribe")
