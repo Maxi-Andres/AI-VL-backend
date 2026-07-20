@@ -108,6 +108,7 @@ class CommandRequest(BaseModel):
     text: str = ""
     image: str | None = None
     model: str | None = None
+    robot: str | None = None
     num_ctx: int | None = None
     max_tokens: int | None = None
 
@@ -179,9 +180,12 @@ async def command(req: CommandRequest):
 
 
 @app.get("/api/skills")
-async def skills():
-    """Proxy the G1 skill catalog so the UI can show the available skills/params."""
-    return await proxy_json(client.get("/skills"))
+async def skills(robot: str = ""):
+    """Proxy the robot skill catalog so the UI can show the available skills/params
+    and the list of robots. `robot` selects the catalog (g1|go2)."""
+    return await proxy_json(
+        client.get("/skills", params={"robot": robot} if robot else None)
+    )
 
 
 @app.post("/api/transcribe")
