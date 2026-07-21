@@ -121,6 +121,7 @@ class CommandExecuteRequest(BaseModel):
     robot: str | None = None
     skill: str = ""
     params: dict | None = None
+    safe_mode: bool | None = None
 
 
 async def proxy_json(call):
