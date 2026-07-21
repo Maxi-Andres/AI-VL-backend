@@ -40,6 +40,10 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from pydantic import BaseModel
 
 IACORE_URL = os.environ.get("IACORE_URL", "http://localhost:8001").rstrip("/")
+# The robot executor (ROS2 skill executor) — a separate service, usually the
+# unitree_ros2 devcontainer on this host (host-networked -> localhost). It turns a
+# skill JSON into a real robot command. Off the hot path, so a one-shot client.
+EXECUTOR_URL = os.environ.get("EXECUTOR_URL", "http://localhost:8090").rstrip("/")
 CORS_ORIGINS = [o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",") if o.strip()]
 FRONTEND_DIST = os.environ.get("FRONTEND_DIST", "").strip()
 
@@ -113,6 +117,12 @@ class CommandRequest(BaseModel):
     max_tokens: int | None = None
 
 
+class CommandExecuteRequest(BaseModel):
+    robot: str | None = None
+    skill: str = ""
+    params: dict | None = None
+
+
 async def proxy_json(call):
     """Await a downstream httpx call and relay its JSON body + status. Map any
     transport failure to a 502 with a clear message (and log it server-side)."""
@@ -177,6 +187,24 @@ async def command(req: CommandRequest):
     """Unitree G1 command interpreter proxy: relay the transcribed text to iacore's
     /command and return the chosen skill JSON. No model deps here — pure gateway."""
     return await proxy_json(client.post("/command", json=req.model_dump(exclude_none=True)))
+
+
+@app.post("/api/execute")
+async def execute(req: CommandExecuteRequest):
+    """Forward a chosen skill to the robot executor (ROS2) so the robot acts on it.
+    Kept a one-shot httpx call (the executor may live in a different process/container
+    than iacore). Relays the executor's JSON + status; 502 if it's unreachable."""
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=3.0, read=20.0, write=5.0, pool=3.0)
+        ) as ec:
+            r = await ec.post(f"{EXECUTOR_URL}/execute",
+                              json=req.model_dump(exclude_none=True))
+        return JSONResponse(r.json(), status_code=r.status_code)
+    except Exception as e:
+        logger.warning("robot executor unreachable: %s", e)
+        return JSONResponse(
+            {"ok": False, "error": f"robot executor unreachable: {e}"}, status_code=502)
 
 
 @app.get("/api/skills")
