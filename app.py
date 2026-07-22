@@ -44,6 +44,9 @@ IACORE_URL = os.environ.get("IACORE_URL", "http://localhost:8001").rstrip("/")
 # unitree_ros2 devcontainer on this host (host-networked -> localhost). It turns a
 # skill JSON into a real robot command. Off the hot path, so a one-shot client.
 EXECUTOR_URL = os.environ.get("EXECUTOR_URL", "http://localhost:8090").rstrip("/")
+# The robot camera bridge control (start/stop the robot-camera stream). Usually the
+# unitree_ros2 devcontainer on this host (host-networked -> localhost).
+CAMERA_CONTROL_URL = os.environ.get("CAMERA_CONTROL_URL", "http://localhost:8091").rstrip("/")
 CORS_ORIGINS = [o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",") if o.strip()]
 FRONTEND_DIST = os.environ.get("FRONTEND_DIST", "").strip()
 
@@ -206,6 +209,35 @@ async def execute(req: CommandExecuteRequest):
         logger.warning("robot executor unreachable: %s", e)
         return JSONResponse(
             {"ok": False, "error": f"robot executor unreachable: {e}"}, status_code=502)
+
+
+@app.post("/api/robot-camera/{action}")
+async def robot_camera(action: str):
+    """Start/stop the robot camera stream via the camera bridge (in the devcontainer).
+    The bridge, while streaming, feeds frames to /ws/robot-cam below."""
+    if action not in ("start", "stop"):
+        return JSONResponse({"ok": False, "error": "unknown action"}, status_code=400)
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=3.0, read=10.0, write=5.0, pool=3.0)
+        ) as cc:
+            r = await cc.post(f"{CAMERA_CONTROL_URL}/{action}")
+        return JSONResponse(r.json(), status_code=r.status_code)
+    except Exception as e:
+        logger.warning("camera bridge unreachable: %s", e)
+        return JSONResponse(
+            {"ok": False, "error": f"camera bridge unreachable: {e}"}, status_code=502)
+
+
+@app.get("/api/robot-camera/status")
+async def robot_camera_status():
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=3.0, read=5.0, write=5.0, pool=3.0)) as cc:
+            r = await cc.get(f"{CAMERA_CONTROL_URL}/status")
+        return JSONResponse(r.json(), status_code=r.status_code)
+    except Exception as e:
+        return JSONResponse({"ok": False, "streaming": False,
+                             "error": f"camera bridge unreachable: {e}"}, status_code=502)
 
 
 @app.get("/api/skills")
@@ -473,6 +505,25 @@ async def ws_view(ws: WebSocket):
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@app.websocket("/ws/robot-cam")
+async def ws_robot_cam(ws: WebSocket):
+    """Raw robot-camera producer (the camera bridge connects here). Each binary JPEG
+    frame is fanned out straight to the monitors (/ws/view) with EMPTY detections —
+    no iacore/YOLO in the loop — for a minimum-latency view of the robot camera."""
+    await ws.accept()
+    try:
+        while True:
+            msg = await ws.receive()
+            if msg.get("type") == "websocket.disconnect":
+                break
+            data = msg.get("bytes")
+            if not data:
+                continue  # ignore any text/config; this producer only sends frames
+            hub.fanout(data, {"objects": [], "n": 0, "elapsed_ms": 0})
+    except WebSocketDisconnect:
+        pass
 
 
 # --------------------------------------------------------------------------- #
