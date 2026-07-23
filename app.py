@@ -297,6 +297,22 @@ async def speak(req: SpeakRequest):
 # only does so WHILE a monitor is attached: with no viewers, fan-out is skipped
 # entirely, so an idle monitor uses zero bandwidth.
 # --------------------------------------------------------------------------- #
+def _detect_params(cfg: dict) -> dict:
+    """Build the iacore /detect query params from the shared session config.
+    Shared by the phone producer (/ws/detect) and the robot-camera producer
+    (/ws/robot-cam) so both run YOLO with the same model/conf/imgsz/classes."""
+    params: dict = {}
+    if cfg.get("model"):
+        params["model"] = cfg["model"]
+    if cfg.get("conf") is not None:
+        params["conf"] = cfg["conf"]
+    if cfg.get("imgsz") is not None:
+        params["imgsz"] = cfg["imgsz"]
+    if cfg.get("classes"):
+        params["classes"] = ",".join(cfg["classes"])
+    return params
+
+
 def _put_latest(q: "asyncio.Queue", item) -> None:
     """Enqueue without ever blocking: if the queue is full, drop the oldest item
     first. Keeps the freshest data flowing to a slow consumer."""
@@ -344,6 +360,11 @@ class Hub:
             "imgsz": None,
             "classes": [],
             "max_fps": None,
+            # Master YOLO on/off, shared across clients. Default OFF so the GPU
+            # stays idle until someone turns detection on. The producers below
+            # read it: /ws/detect is gated client-side; /ws/robot-cam checks it
+            # to decide whether to run iacore on the robot frames.
+            "enabled": False,
         }
 
     def add(self, conn: Conn) -> None:
@@ -357,7 +378,7 @@ class Hub:
         push the new config to every client except the origin. Only broadcasting
         on a real change is what stops the sync from looping between clients."""
         changed = False
-        for k in ("model", "conf", "imgsz", "classes", "max_fps"):
+        for k in ("model", "conf", "imgsz", "classes", "max_fps", "enabled"):
             if k in upd and upd[k] is not None and self.config[k] != upd[k]:
                 self.config[k] = upd[k]
                 changed = True
@@ -437,15 +458,7 @@ async def ws_detect(ws: WebSocket):
             if not data:
                 continue
 
-            params = {}
-            if hub.config["model"]:
-                params["model"] = hub.config["model"]
-            if hub.config["conf"] is not None:
-                params["conf"] = hub.config["conf"]
-            if hub.config["imgsz"] is not None:
-                params["imgsz"] = hub.config["imgsz"]
-            if hub.config["classes"]:
-                params["classes"] = ",".join(hub.config["classes"])
+            params = _detect_params(hub.config)
 
             try:
                 r = await client.post("/detect", content=data, params=params)
@@ -509,10 +522,16 @@ async def ws_view(ws: WebSocket):
 
 @app.websocket("/ws/robot-cam")
 async def ws_robot_cam(ws: WebSocket):
-    """Raw robot-camera producer (the camera bridge connects here). Each binary JPEG
-    frame is fanned out straight to the monitors (/ws/view) with EMPTY detections —
-    no iacore/YOLO in the loop — for a minimum-latency view of the robot camera."""
+    """Robot-camera producer (the camera bridge connects here). Each binary JPEG
+    frame is fanned out to the monitors (/ws/view).
+
+    YOLO is OPT-IN and shared: when the session's `enabled` flag is off (the
+    default) frames are relayed straight through with EMPTY detections, for a
+    minimum-latency view and zero GPU use. When it's on, each frame is first sent
+    to iacore's /detect (same model/conf/imgsz/classes as the phone) and fanned
+    out WITH the boxes — so the robot video can show detections too."""
     await ws.accept()
+    empty = {"objects": [], "n": 0, "elapsed_ms": 0}
     try:
         while True:
             msg = await ws.receive()
@@ -521,7 +540,17 @@ async def ws_robot_cam(ws: WebSocket):
             data = msg.get("bytes")
             if not data:
                 continue  # ignore any text/config; this producer only sends frames
-            hub.fanout(data, {"objects": [], "n": 0, "elapsed_ms": 0})
+            det = empty
+            if hub.config.get("enabled"):
+                try:
+                    r = await client.post(
+                        "/detect", content=data, params=_detect_params(hub.config))
+                    d = r.json()
+                    if not (isinstance(d, dict) and "error" in d):
+                        det = d
+                except Exception as e:
+                    logger.warning("iacore /detect (robot-cam) failed: %s", e)
+            hub.fanout(data, det)
     except WebSocketDisconnect:
         pass
 
