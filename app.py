@@ -27,7 +27,6 @@ Run (from the backend repo root, venv active):
     uvicorn app:app --host 0.0.0.0 --port 8000
 """
 import asyncio
-import base64
 import json
 import logging
 import os
@@ -127,6 +126,13 @@ class CommandExecuteRequest(BaseModel):
     safe_mode: bool | None = None
 
 
+class RobotCameraConfig(BaseModel):
+    robot: str | None = None  # go2 | g1 | test — switches the camera source
+    fps: float | None = None
+    resolution: str | None = None  # native | 720p | 480p | 360p
+    quality: int | None = None
+
+
 async def proxy_json(call):
     """Await a downstream httpx call and relay its JSON body + status. Map any
     transport failure to a 502 with a clear message (and log it server-side)."""
@@ -209,6 +215,24 @@ async def execute(req: CommandExecuteRequest):
         logger.warning("robot executor unreachable: %s", e)
         return JSONResponse(
             {"ok": False, "error": f"robot executor unreachable: {e}"}, status_code=502)
+
+
+@app.post("/api/robot-camera/config")
+async def robot_camera_config(req: RobotCameraConfig):
+    """Reconfigure the shared robot-camera source (fps/resolution/quality) via the
+    bridge. One call affects every viewer, since they all watch the same source.
+    Declared BEFORE the /{action} route so "config" isn't captured as an action."""
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=3.0, read=10.0, write=5.0, pool=3.0)
+        ) as cc:
+            r = await cc.post(f"{CAMERA_CONTROL_URL}/config",
+                              json=req.model_dump(exclude_none=True))
+        return JSONResponse(r.json(), status_code=r.status_code)
+    except Exception as e:
+        logger.warning("camera bridge unreachable: %s", e)
+        return JSONResponse(
+            {"ok": False, "error": f"camera bridge unreachable: {e}"}, status_code=502)
 
 
 @app.post("/api/robot-camera/{action}")
@@ -346,6 +370,10 @@ class Conn:
         async with self.send_lock:
             await self.ws.send_json(msg)
 
+    async def send_bytes(self, data: bytes) -> None:
+        async with self.send_lock:
+            await self.ws.send_bytes(data)
+
 
 class Hub:
     def __init__(self):
@@ -389,17 +417,15 @@ class Hub:
                     _put_latest(c.config_q, msg)
 
     def fanout(self, jpeg: bytes, det: dict) -> None:
-        payload = None
+        # Enqueue the RAW jpeg bytes + detections (no base64, no JSON here). The
+        # per-viewer frame pump sends the JPEG as a BINARY WebSocket frame and the
+        # boxes as a tiny separate JSON message. This removes the per-viewer
+        # base64+json.dumps of a huge string that used to hog the single event loop
+        # (so extra viewers no longer add latency to control/other viewers).
+        item = (jpeg, det)
         for c in self.conns:
-            if not c.is_viewer:
-                continue
-            if payload is None:  # encode once, and only if a monitor is attached
-                payload = {
-                    "type": "frame",
-                    "jpeg_b64": base64.b64encode(jpeg).decode("ascii"),
-                    **det,
-                }
-            _put_latest(c.frame_q, payload)
+            if c.is_viewer:
+                _put_latest(c.frame_q, item)
 
 
 hub = Hub()
@@ -416,6 +442,22 @@ async def _pump(conn: Conn, queue: "asyncio.Queue") -> None:
         raise
     except Exception as e:
         logger.debug("sender loop stopped: %s", e)
+
+
+async def _pump_frames(conn: Conn) -> None:
+    """Send fanned-out frames to a viewer: the boxes as a tiny JSON message, then
+    the JPEG as a BINARY WebSocket frame. The det message is sent every frame (even
+    empty) so the overlay clears when detection turns off. This is the low-cost
+    replacement for the old base64-in-JSON payload."""
+    try:
+        while True:
+            jpeg, det = await conn.frame_q.get()
+            await conn.send({"type": "det", **det})
+            await conn.send_bytes(jpeg)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.debug("frame sender loop stopped: %s", e)
 
 
 # --------------------------------------------------------------------------- #
@@ -493,7 +535,7 @@ async def ws_view(ws: WebSocket):
     hub.add(conn)
 
     tasks = [
-        asyncio.create_task(_pump(conn, conn.frame_q)),
+        asyncio.create_task(_pump_frames(conn)),
         asyncio.create_task(_pump(conn, conn.config_q)),
     ]
     try:
