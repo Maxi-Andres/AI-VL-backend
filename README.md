@@ -28,8 +28,11 @@ Point it at wherever the iacore service runs, then start it:
 
 ```bash
 export IACORE_URL=http://localhost:8001      # default; change for a remote iacore
-uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+uvicorn app:app --host 0.0.0.0 --port 8000 --reload   # --reload is for development only
 ```
+
+The `--reload` flag is a development convenience (auto-restart on file changes); the
+single-origin HTTPS deploy driven by the ecosystem `run.sh` does not use it.
 
 Check it can reach iacore: <http://localhost:8000/api/health>.
 
