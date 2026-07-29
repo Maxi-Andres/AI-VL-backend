@@ -30,6 +30,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 
 import httpx
@@ -48,6 +49,14 @@ EXECUTOR_URL = os.environ.get("EXECUTOR_URL", "http://localhost:8090").rstrip("/
 CAMERA_CONTROL_URL = os.environ.get("CAMERA_CONTROL_URL", "http://localhost:8091").rstrip("/")
 CORS_ORIGINS = [o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",") if o.strip()]
 FRONTEND_DIST = os.environ.get("FRONTEND_DIST", "").strip()
+
+# Presence (GET /api/presence, see the section at the bottom of this file).
+# A robot counts as LIVE while a frame arrived within this window — at the lowest
+# selectable capture rate (5 fps) that is still many frames, so a real stream never
+# flickers to offline.
+ROBOT_CAM_LIVE_WINDOW = 3.0
+# Cache window for one presence probe round, shared by every polling browser.
+PRESENCE_TTL = 1.5
 
 # Log through uvicorn's configured handler so gateway failures land in the same
 # stream as the access logs (uvicorn owns the root logging config).
@@ -124,6 +133,15 @@ class CommandExecuteRequest(BaseModel):
     skill: str = ""
     params: dict | None = None
     safe_mode: bool | None = None
+
+
+class RobotNetConfig(BaseModel):
+    """Where the robot lives on the network, for the DDS transport. `peers` are the
+    robot's IPs for unicast discovery — required whenever the robot is not on the same
+    subnet as the executor, since DDS discovery is multicast and multicast does not
+    cross a router. Empty list = back to plain multicast."""
+    peers: list[str] = []
+    iface: str | None = None
 
 
 class RobotCameraConfig(BaseModel):
@@ -209,6 +227,39 @@ async def execute(req: CommandExecuteRequest):
             timeout=httpx.Timeout(connect=3.0, read=20.0, write=5.0, pool=3.0)
         ) as ec:
             r = await ec.post(f"{EXECUTOR_URL}/execute",
+                              json=req.model_dump(exclude_none=True))
+        return JSONResponse(r.json(), status_code=r.status_code)
+    except Exception as e:
+        logger.warning("robot executor unreachable: %s", e)
+        return JSONResponse(
+            {"ok": False, "error": f"robot executor unreachable: {e}"}, status_code=502)
+
+
+@app.get("/api/robot-net")
+async def robot_net():
+    """Current DDS transport of the robot executor (interface + unicast peers)."""
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=3.0, read=8.0, write=5.0, pool=3.0)
+        ) as ec:
+            r = await ec.get(f"{EXECUTOR_URL}/dds")
+        return JSONResponse(r.json(), status_code=r.status_code)
+    except Exception as e:
+        logger.warning("robot executor unreachable: %s", e)
+        return JSONResponse(
+            {"ok": False, "error": f"robot executor unreachable: {e}"}, status_code=502)
+
+
+@app.post("/api/robot-net")
+async def set_robot_net(req: RobotNetConfig):
+    """Point the stack at the robot on another network (e.g. its wlan0 on another VLAN).
+    The executor persists it and RESTARTS itself to apply it — CycloneDDS reads its
+    config once per process — so expect a few seconds of downtime after this returns."""
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=3.0, read=15.0, write=5.0, pool=3.0)
+        ) as ec:
+            r = await ec.post(f"{EXECUTOR_URL}/dds",
                               json=req.model_dump(exclude_none=True))
         return JSONResponse(r.json(), status_code=r.status_code)
     except Exception as e:
@@ -401,6 +452,17 @@ class Hub:
     def remove(self, conn: Conn) -> None:
         self.conns.discard(conn)
 
+    def web_counts(self) -> dict:
+        """How many browsers are on the session right now, split by role: producers
+        stream their own camera in on /ws/detect, viewers only watch /ws/view. (The
+        robot-camera producer is NOT a hub Conn — see RobotCamState.)"""
+        viewers = sum(1 for c in self.conns if c.is_viewer)
+        return {
+            "producers": len(self.conns) - viewers,
+            "viewers": viewers,
+            "total": len(self.conns),
+        }
+
     def apply_config(self, upd: dict, origin: "Conn | None" = None) -> None:
         """Merge an update into the shared config; if anything actually changed,
         push the new config to every client except the origin. Only broadcasting
@@ -429,6 +491,31 @@ class Hub:
 
 
 hub = Hub()
+
+
+class RobotCamState:
+    """Liveness of the robot-camera producer AS SEEN BY THIS GATEWAY: how many
+    bridge sockets are attached and when a frame last actually arrived. Kept
+    separate from what the bridge says about itself, so a hung bridge (or a robot
+    that stopped publishing) can't keep claiming it is streaming."""
+
+    def __init__(self):
+        self.attached = 0
+        self.frames = 0
+        self.last_frame = 0.0
+
+    def frame(self) -> None:
+        self.frames += 1
+        self.last_frame = time.monotonic()
+
+    def snapshot(self) -> dict:
+        live = bool(self.attached) and (
+            time.monotonic() - self.last_frame < ROBOT_CAM_LIVE_WINDOW
+        )
+        return {"attached": bool(self.attached), "live": live, "frames": self.frames}
+
+
+robot_cam = RobotCamState()
 
 
 async def _pump(conn: Conn, queue: "asyncio.Queue") -> None:
@@ -574,6 +661,7 @@ async def ws_robot_cam(ws: WebSocket):
     out WITH the boxes — so the robot video can show detections too."""
     await ws.accept()
     empty = {"objects": [], "n": 0, "elapsed_ms": 0}
+    robot_cam.attached += 1
     try:
         while True:
             msg = await ws.receive()
@@ -582,6 +670,7 @@ async def ws_robot_cam(ws: WebSocket):
             data = msg.get("bytes")
             if not data:
                 continue  # ignore any text/config; this producer only sends frames
+            robot_cam.frame()
             det = empty
             if hub.config.get("enabled"):
                 try:
@@ -595,6 +684,88 @@ async def ws_robot_cam(ws: WebSocket):
             hub.fanout(data, det)
     except WebSocketDisconnect:
         pass
+    finally:
+        robot_cam.attached = max(0, robot_cam.attached - 1)
+
+
+# --------------------------------------------------------------------------- #
+# Presence: WHO is attached right now. This gateway is the only process that sees
+# every participant (the robot-camera bridge, the browsers on the hub) and can
+# reach the sidecars, so it aggregates the facts here and the UI renders one pill
+# per participant. Deliberately only FACTS: the gateway does not know the robot
+# registry (that lives in iacore), so it reports which robot the bridge selected
+# as its source and lets the UI join that against the robot list.
+# --------------------------------------------------------------------------- #
+_presence_cache: "tuple[float, dict]" = (0.0, {})
+_presence_lock = asyncio.Lock()
+
+# Short probe timeouts: presence is polled, so it must never hang a UI.
+_PROBE_TIMEOUT = httpx.Timeout(connect=1.0, read=2.0, write=2.0, pool=1.0)
+
+
+async def _probe_json(url: str) -> "dict | None":
+    """GET a small JSON status from a sidecar. None means it did not answer."""
+    try:
+        async with httpx.AsyncClient(timeout=_PROBE_TIMEOUT) as c:
+            r = await c.get(url)
+        d = r.json()
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return None
+
+
+async def _probe_iacore() -> bool:
+    try:
+        r = await client.get("/health", timeout=_PROBE_TIMEOUT)
+        return r.status_code < 500
+    except Exception:
+        return False
+
+
+@app.get("/api/presence")
+async def presence():
+    """Who is connected right now, for the header pills: the robot-camera producer
+    (and which robot it is streaming), the browsers on the hub, and whether the
+    executor / iacore answer.
+
+    Cached for PRESENCE_TTL and serialized on a lock so N polling browsers cost ONE
+    probe round — the bridge and the executor are single-threaded HTTP servers that
+    sit on the robot control path, and must not be hammered."""
+    global _presence_cache
+    async with _presence_lock:
+        ts, cached = _presence_cache
+        now = time.monotonic()
+        if cached and now - ts < PRESENCE_TTL:
+            return cached
+
+        bridge, executor, iacore_ok = await asyncio.gather(
+            _probe_json(f"{CAMERA_CONTROL_URL}/status"),
+            _probe_json(f"{EXECUTOR_URL}/health"),
+            _probe_iacore(),
+        )
+        b, e = bridge or {}, executor or {}
+        data = {
+            "web": hub.web_counts(),
+            "robot_cam": {
+                **robot_cam.snapshot(),
+                # `bridge`/`streaming` are the bridge's self-report; `live` above is
+                # this gateway's own evidence (frames really arriving).
+                "bridge": bridge is not None,
+                "robot": b.get("robot"),
+                "streaming": bool(b.get("streaming")),
+                "fps": b.get("fps"),
+                "resolution": b.get("resolution"),
+            },
+            "executor": {
+                "online": executor is not None,
+                "default_robot": e.get("default_robot"),
+                "safe_mode": e.get("safe_mode"),
+                "dry_run": e.get("dry_run"),
+            },
+            "iacore": {"online": iacore_ok},
+        }
+        _presence_cache = (now, data)
+        return data
 
 
 # --------------------------------------------------------------------------- #
