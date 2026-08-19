@@ -144,6 +144,12 @@ class RobotNetConfig(BaseModel):
     iface: str | None = None
 
 
+class RobotTransportConfig(BaseModel):
+    robot: str | None = None       # go2 | g1
+    mode: str | None = None        # dds (from this machine) | relay (agent on the robot)
+    url: str | None = None         # the robot-side relay, e.g. http://10.1.254.18:8092
+
+
 class RobotCameraConfig(BaseModel):
     robot: str | None = None  # go2 | g1 | test — switches the camera source
     fps: float | None = None
@@ -260,6 +266,39 @@ async def set_robot_net(req: RobotNetConfig):
             timeout=httpx.Timeout(connect=3.0, read=15.0, write=5.0, pool=3.0)
         ) as ec:
             r = await ec.post(f"{EXECUTOR_URL}/dds",
+                              json=req.model_dump(exclude_none=True))
+        return JSONResponse(r.json(), status_code=r.status_code)
+    except Exception as e:
+        logger.warning("robot executor unreachable: %s", e)
+        return JSONResponse(
+            {"ok": False, "error": f"robot executor unreachable: {e}"}, status_code=502)
+
+
+@app.get("/api/robot-transport")
+async def robot_transport():
+    """How commands reach each robot: DDS from this machine, or a relay ON the robot.
+    DDS only works while the robot shares this machine's subnet; the relay works anywhere."""
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=3.0, read=8.0, write=5.0, pool=3.0)
+        ) as ec:
+            r = await ec.get(f"{EXECUTOR_URL}/transport")
+        return JSONResponse(r.json(), status_code=r.status_code)
+    except Exception as e:
+        logger.warning("robot executor unreachable: %s", e)
+        return JSONResponse(
+            {"ok": False, "error": f"robot executor unreachable: {e}"}, status_code=502)
+
+
+@app.post("/api/robot-transport")
+async def set_robot_transport(req: RobotTransportConfig):
+    """Switch a robot between DDS and the on-robot relay. The executor persists it and
+    RESTARTS to apply it, so expect a few seconds of downtime after this returns."""
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=3.0, read=15.0, write=5.0, pool=3.0)
+        ) as ec:
+            r = await ec.post(f"{EXECUTOR_URL}/transport",
                               json=req.model_dump(exclude_none=True))
         return JSONResponse(r.json(), status_code=r.status_code)
     except Exception as e:
