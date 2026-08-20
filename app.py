@@ -148,6 +148,7 @@ class RobotTransportConfig(BaseModel):
     robot: str | None = None       # go2 | g1
     mode: str | None = None        # dds (from this machine) | relay (agent on the robot)
     url: str | None = None         # the robot-side relay, e.g. http://10.1.254.18:8092
+    ping_ip: str | None = None     # address probed for the online/offline indicator
 
 
 class RobotCameraConfig(BaseModel):
@@ -274,6 +275,38 @@ async def set_robot_net(req: RobotNetConfig):
             {"ok": False, "error": f"robot executor unreachable: {e}"}, status_code=502)
 
 
+# --- Robot reachability ---------------------------------------------------------------- #
+# Probed HERE, on the host, not in the executor's container: ICMP needs raw sockets, which
+# the container does not have. Cached briefly because the UI polls this and a ping costs a
+# round trip.
+_PING_CACHE: dict[str, tuple[float, bool]] = {}
+_PING_TTL = 4.0
+
+
+async def _ping(ip: str, timeout: float = 1.2) -> bool:
+    """True if the host answers ICMP. One packet, short deadline: this drives a UI dot."""
+    if not ip:
+        return False
+    now = time.monotonic()
+    hit = _PING_CACHE.get(ip)
+    if hit and now - hit[0] < _PING_TTL:
+        return hit[1]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ping", "-c", "1", "-W", "1", ip,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        try:
+            rc = await asyncio.wait_for(proc.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            rc = 1
+        ok = rc == 0
+    except Exception:
+        ok = False
+    _PING_CACHE[ip] = (now, ok)
+    return ok
+
+
 @app.get("/api/robot-transport")
 async def robot_transport():
     """How commands reach each robot: DDS from this machine, or a relay ON the robot.
@@ -283,7 +316,16 @@ async def robot_transport():
             timeout=httpx.Timeout(connect=3.0, read=8.0, write=5.0, pool=3.0)
         ) as ec:
             r = await ec.get(f"{EXECUTOR_URL}/transport")
-        return JSONResponse(r.json(), status_code=r.status_code)
+        data = r.json()
+        # Enrich with reachability so the UI can show online/offline per robot without a
+        # second endpoint. Probed in parallel: two sequential pings would be visible lag.
+        transports = data.get("transports") or {}
+        names = list(transports)
+        results = await asyncio.gather(
+            *(_ping(transports[n].get("ping_ip", "")) for n in names))
+        for name, online in zip(names, results):
+            transports[name]["online"] = online
+        return JSONResponse(data, status_code=r.status_code)
     except Exception as e:
         logger.warning("robot executor unreachable: %s", e)
         return JSONResponse(
