@@ -283,7 +283,7 @@ _PING_CACHE: dict[str, tuple[float, bool]] = {}
 _PING_TTL = 4.0
 
 
-async def _ping(ip: str, timeout: float = 1.2) -> bool:
+async def _ping(ip: str, timeout: float = 1.2) -> bool:  # noqa: ASYNC109  # bounded with asyncio.wait_for below, which is the documented pattern
     """True if the host answers ICMP. One packet, short deadline: this drives a UI dot."""
     if not ip:
         return False
@@ -297,7 +297,7 @@ async def _ping(ip: str, timeout: float = 1.2) -> bool:
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
         try:
             rc = await asyncio.wait_for(proc.wait(), timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             proc.kill()
             rc = 1
         ok = rc == 0
@@ -323,7 +323,7 @@ async def robot_transport():
         names = list(transports)
         results = await asyncio.gather(
             *(_ping(transports[n].get("ping_ip", "")) for n in names))
-        for name, online in zip(names, results):
+        for name, online in zip(names, results, strict=True):  # gather preserves order and length
             transports[name]["online"] = online
         return JSONResponse(data, status_code=r.status_code)
     except Exception as e:
@@ -864,13 +864,13 @@ if FRONTEND_DIST and os.path.isdir(FRONTEND_DIST):
     async def spa(full_path: str):
         if full_path.startswith(("api/", "ws/")):
             return JSONResponse({"detail": "Not Found"}, status_code=404)
-        candidate = os.path.normpath(os.path.join(DIST_ABS, full_path))
+        candidate = os.path.normpath(os.path.join(DIST_ABS, full_path))  # noqa: ASYNC240  # one local stat of a served file; an async FS layer is not worth a dependency
         # Serve a real asset if it exists (and stays inside dist), else fall back
         # to index.html for client-side routes (React Router).
         if (
             full_path
             and candidate.startswith(DIST_ABS + os.sep)
-            and os.path.isfile(candidate)
+            and os.path.isfile(candidate)  # noqa: ASYNC240  # one local stat of a served file; an async FS layer is not worth a dependency
         ):
             return FileResponse(candidate)
         return FileResponse(os.path.join(DIST_ABS, "index.html"))

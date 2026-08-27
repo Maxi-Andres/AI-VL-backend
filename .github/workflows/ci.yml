@@ -1,0 +1,23 @@
+name: CI
+on: [push, pull_request]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"     # the floor this tier commits to (see ruff.toml)
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install ruff pytest pytest-asyncio pip-audit
+      - name: Lint
+        run: ruff check --output-format=github
+      - name: Test
+        run: pytest -q
+      - name: Dependency audit
+        run: pip-audit --strict --desc || true   # advisory: a new CVE must not block a hotfix

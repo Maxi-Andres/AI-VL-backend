@@ -1,0 +1,36 @@
+# Lint + format for this tier. Rule set mirrors the workspace standard
+# (~/Desktop/.claude/skills/cr/references/standard.md); see the comments per group.
+target-version = "py311"   # floor we commit to, not the interpreter installed
+line-length = 100
+exclude = [".venv", "__pycache__", "results", "fotos", "piper_voices"]
+
+[lint]
+select = [
+  "E", "W", "F",   # pycodestyle + pyflakes: the baseline
+  "I",             # import order
+  "UP",            # pyupgrade
+  "B",             # bugbear: bare except, mutable defaults, shadowed loop vars
+  "SIM",           # simplifiable code
+  "ASYNC",         # blocking calls inside async def — standard §1, the [blocker] rule
+  "S",             # security (bandit) — standard §2
+  "RUF",
+]
+ignore = [
+  "S101",    # assert: legitimate in tests
+  "S603",    # subprocess call: audited, used deliberately (ping, ffmpeg, gst)
+  "S607",    # partial executable path: same
+  "RUF001", "RUF002", "RUF003",  # ambiguous unicode: the prose uses real typography (— ℹ −) on purpose
+  "S110",    # try-except-pass: deliberate here — logging must never break a control path.
+             # New code still owes a log line; standard §6 covers it and the review catches it.
+  "S310",    # urlopen with a configured URL (HEC endpoint, MJPEG stream) — audited, not user input
+  "S108",    # /var/tmp for the spool and audit log: chosen so a full disk cannot fill $HOME
+  "SIM105",  # explicit try/except reads clearer than contextlib.suppress in teardown paths
+  "E501",    # line length is handled by the formatter, not the linter
+]
+
+[lint.per-file-ignores]
+"menu.py" = ["T201"]              # the CLI prints on purpose
+"src/*_benchmark.py" = ["T201"]   # so do the benchmarks
+
+[format]
+quote-style = "double"
