@@ -151,6 +151,17 @@ class RobotTransportConfig(BaseModel):
     ping_ip: str | None = None     # address probed for the online/offline indicator
 
 
+class RobotVideoConfig(BaseModel):
+    """The robot's LIVE video knobs. Ranges are NOT declared here on purpose: the on-robot
+    relay owns them, and a second copy in the gateway would drift from it."""
+
+    robot: str | None = None       # go2 | g1
+    fps: float | None = None       # cap for HTTP viewers; 0 = every frame
+    width: int | None = None       # downscale width; 0 = native, no re-encode at all
+    quality: int | None = None     # JPEG quality, only meaningful when width > 0
+    persist: bool | None = None    # also write the robot's video.env
+
+
 class RobotCameraConfig(BaseModel):
     robot: str | None = None  # go2 | g1 | test — switches the camera source
     fps: float | None = None
@@ -341,6 +352,45 @@ async def set_robot_transport(req: RobotTransportConfig):
             timeout=httpx.Timeout(connect=3.0, read=15.0, write=5.0, pool=3.0)
         ) as ec:
             r = await ec.post(f"{EXECUTOR_URL}/transport",
+                              json=req.model_dump(exclude_none=True))
+        return JSONResponse(r.json(), status_code=r.status_code)
+    except Exception as e:
+        logger.warning("robot executor unreachable: %s", e)
+        return JSONResponse(
+            {"ok": False, "error": f"robot executor unreachable: {e}"}, status_code=502)
+
+
+@app.get("/api/robot-video")
+async def robot_video(robot: str = "go2"):
+    """The robot's LIVE video knobs: what is running, what is saved, and the valid ranges.
+
+    Running and saved are reported separately on purpose — editing the robot's video.env
+    without restarting the publisher is exactly how this report used to lie."""
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=3.0, read=8.0, write=5.0, pool=3.0)
+        ) as ec:
+            r = await ec.get(f"{EXECUTOR_URL}/video", params={"robot": robot})
+        return JSONResponse(r.json(), status_code=r.status_code)
+    except Exception as e:
+        logger.warning("robot executor unreachable: %s", e)
+        return JSONResponse(
+            {"ok": False, "error": f"robot executor unreachable: {e}"}, status_code=502)
+
+
+@app.post("/api/robot-video")
+async def set_robot_video(req: RobotVideoConfig):
+    """Retune the robot's live view. Applies immediately, with NO restart and no gap in
+    the stream; `persist` also writes the robot's video.env so it survives one.
+
+    The gateway does not validate the values: the on-robot relay owns the allowlist and
+    the ranges, and duplicating them here would give us two sources of truth for the same
+    contract and one of them would drift."""
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=3.0, read=10.0, write=5.0, pool=3.0)
+        ) as ec:
+            r = await ec.post(f"{EXECUTOR_URL}/video",
                               json=req.model_dump(exclude_none=True))
         return JSONResponse(r.json(), status_code=r.status_code)
     except Exception as e:
