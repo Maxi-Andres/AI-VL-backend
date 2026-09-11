@@ -156,9 +156,17 @@ class RobotVideoConfig(BaseModel):
     relay owns them, and a second copy in the gateway would drift from it."""
 
     robot: str | None = None       # go2 | g1
+    # Applied instantly, no restart:
     fps: float | None = None       # cap for HTTP viewers; 0 = every frame
     width: int | None = None       # downscale width; 0 = native, no re-encode at all
     quality: int | None = None     # JPEG quality, only meaningful when width > 0
+    # Saved only — the gst pipeline reads these at launch, so they need a restart of the
+    # robot's video service. The relay refuses them unless persist is set, because a knob
+    # that silently does nothing is worse than one that says no.
+    bitrate: int | None = None     # H.264 bitrate for the recording branch
+    maxfps: int | None = None      # capture rate cap
+    idr: int | None = None         # keyframe interval, in frames
+    nvr: int | None = None         # 1/0: feed the recording branch at all
     persist: bool | None = None    # also write the robot's video.env
 
 
