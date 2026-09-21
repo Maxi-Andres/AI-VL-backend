@@ -788,6 +788,73 @@ async def ws_view(ws: WebSocket):
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
+# --------------------------------------------------------------------------- #
+# The DRIVE branch: all-intra H.264, relayed untouched.
+#
+# A SECOND CHANNEL AND NOT A MODE OF THE FIRST, deliberately. /ws/view carries JPEG and three
+# consumers assume it: the browser's <img>, YOLO and the VLM. Putting H.264 in there would
+# break all three at once. The two branches exist precisely so the drive view and the
+# detectors stop having to be the same picture.
+#
+# THIS TIER DOES NOT DECODE. It relays bytes: the robot encodes, the browser decodes with
+# WebCodecs. Measured 2026-09-21: 4207 B per frame against the JPEG's ~9000 at the same
+# quality, and 0.7 ms to decode one in the browser.
+#
+# WIRE FORMAT: one binary message per frame = 8-byte little-endian double (the robot's clock
+# when the camera produced it) followed by the access unit. One message, so a frame and its
+# capture time cannot arrive out of order or be paired wrongly under load — which two
+# messages would allow, and which would silently corrupt every latency measurement built on
+# it.
+# --------------------------------------------------------------------------- #
+class H264Hub:
+    """Viewers of the drive branch. Newest-only per viewer, never a queue."""
+
+    def __init__(self):
+        self.viewers: set[asyncio.Queue] = set()
+        self.frames = 0
+        self.last_at = 0.0
+
+    def fanout(self, message: bytes) -> None:
+        self.frames += 1
+        self.last_at = time.time()
+        for q in self.viewers:
+            _put_latest(q, message)
+
+
+h264_hub = H264Hub()
+
+
+@app.websocket("/ws/robot-h264")
+async def ws_robot_h264(ws: WebSocket):
+    """Producer: the camera bridge relays the robot's all-intra H.264 here."""
+    await ws.accept()
+    try:
+        while True:
+            msg = await ws.receive()
+            if msg.get("type") == "websocket.disconnect":
+                break
+            data = msg.get("bytes")
+            if data and len(data) > 8:
+                h264_hub.fanout(data)
+    except WebSocketDisconnect:
+        pass
+
+
+@app.websocket("/ws/view-h264")
+async def ws_view_h264(ws: WebSocket):
+    """Viewer: the drive page. Gets exactly what the robot produced, byte for byte."""
+    await ws.accept()
+    q: asyncio.Queue = asyncio.Queue(maxsize=1)
+    h264_hub.viewers.add(q)
+    try:
+        while True:
+            await ws.send_bytes(await q.get())
+    except (WebSocketDisconnect, RuntimeError):
+        pass
+    finally:
+        h264_hub.viewers.discard(q)
+
+
 @app.websocket("/ws/robot-cam")
 async def ws_robot_cam(ws: WebSocket):
     """Robot-camera producer (the camera bridge connects here). Each binary JPEG
