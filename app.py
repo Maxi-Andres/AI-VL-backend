@@ -58,6 +58,11 @@ ROBOT_CAM_LIVE_WINDOW = 3.0
 # Cache window for one presence probe round, shared by every polling browser.
 PRESENCE_TTL = 1.5
 
+# Largest body POST /api/detect will accept. A 1080p JPEG off this camera is
+# ~200 KB, so 2 MB is generous headroom; what it buys is that an unbounded body
+# stops being a memory lever on a public endpoint (engineering standard, §2).
+MAX_DETECT_BODY = 2 * 1024 * 1024
+
 # Log through uvicorn's configured handler so gateway failures land in the same
 # stream as the access logs (uvicorn owns the root logging config).
 logger = logging.getLogger("uvicorn.error")
@@ -186,6 +191,22 @@ async def proxy_json(call):
         logger.warning("iacore unreachable: %s", e)
         return JSONResponse({"error": f"iacore unreachable: {e}"}, status_code=502)
     return JSONResponse(r.json(), status_code=r.status_code)
+
+
+async def _bounded_body(request: Request, limit: int) -> "bytes | None":
+    """Read a request body, giving up as soon as it passes `limit` (None then).
+
+    `await request.body()` reads whatever the client sends, with no ceiling. And
+    trusting Content-Length is not a fix: it is client-supplied and a chunked
+    request has none, so the only honest check is counting bytes as they arrive."""
+    size = 0
+    chunks: list[bytes] = []
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > limit:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 # --------------------------------------------------------------------------- #
@@ -511,6 +532,11 @@ async def speak(req: SpeakRequest):
 # only does so WHILE a monitor is attached: with no viewers, fan-out is skipped
 # entirely, so an idle monitor uses zero bandwidth.
 # --------------------------------------------------------------------------- #
+# What a frame carries when nobody detected on it. Handed out as a copy, never
+# shared, so a consumer that mutates its boxes cannot poison the next frame.
+EMPTY_DET = {"objects": [], "n": 0, "elapsed_ms": 0}
+
+
 def _detect_params(cfg: dict) -> dict:
     """Build the iacore /detect query params from the shared session config.
     Shared by the phone producer (/ws/detect) and the robot-camera producer
@@ -552,6 +578,11 @@ class Conn:
     def __init__(self, ws: WebSocket, is_viewer: bool):
         self.ws = ws
         self.is_viewer = is_viewer
+        # Does THIS viewer want boxes? Per connection and never shared, which is
+        # the whole point: the drive view declaring `false` must not turn
+        # detection off for the live view. Default off — a viewer that says
+        # nothing gets the picture at minimum latency and costs no GPU.
+        self.wants_boxes = False
         self.frame_q = asyncio.Queue(maxsize=1) if is_viewer else None
         self.config_q: asyncio.Queue = asyncio.Queue(maxsize=8)
         self.send_lock = asyncio.Lock()
@@ -617,19 +648,85 @@ class Hub:
                 if c is not origin:
                     _put_latest(c.config_q, msg)
 
-    def fanout(self, jpeg: bytes, det: dict) -> None:
-        # Enqueue the RAW jpeg bytes + detections (no base64, no JSON here). The
-        # per-viewer frame pump sends the JPEG as a BINARY WebSocket frame and the
-        # boxes as a tiny separate JSON message. This removes the per-viewer
-        # base64+json.dumps of a huge string that used to hog the single event loop
-        # (so extra viewers no longer add latency to control/other viewers).
+    # Two delivery paths out of one producer, and the split is the whole design:
+    # IMMEDIACY on the raw path, PAIRING on the annotated one. Both enqueue the
+    # RAW jpeg bytes + boxes (no base64, no JSON here); the per-viewer pump sends
+    # the JPEG as a BINARY frame and the boxes as a tiny separate JSON message,
+    # which is what keeps an extra viewer from loading the single event loop.
+
+    def wants_boxes(self) -> bool:
+        """Is anyone asking for detection right now? When nobody is, the producer
+        never calls iacore at all — the cost disappears instead of being tolerated."""
+        return any(c.is_viewer and c.wants_boxes for c in self.conns)
+
+    def fanout_raw(self, jpeg: bytes) -> None:
+        """Deliver to the viewers that want the picture and nothing else (the drive
+        view, and the live view with YOLO off). Nothing may be awaited before this."""
+        item = (jpeg, dict(EMPTY_DET))
+        for c in self.conns:
+            if c.is_viewer and not c.wants_boxes:
+                _put_latest(c.frame_q, item)
+
+    def fanout_annotated(self, jpeg: bytes, det: dict) -> None:
+        """Deliver a frame together with ITS OWN boxes. The pair is built by the
+        caller and travels together, so a viewer can never be shown boxes that
+        describe a different moment than the picture under them."""
         item = (jpeg, det)
         for c in self.conns:
-            if c.is_viewer:
+            if c.is_viewer and c.wants_boxes:
                 _put_latest(c.frame_q, item)
 
 
 hub = Hub()
+
+
+async def _detect(jpeg: bytes) -> dict:
+    """Run one frame through iacore and return its boxes, or EMPTY on any failure.
+
+    Fails OPEN on purpose: a detector that is down must degrade to "no boxes",
+    never to "no picture"."""
+    try:
+        r = await client.post("/detect", content=jpeg, params=_detect_params(hub.config))
+        d = r.json()
+    except Exception as e:
+        logger.warning("iacore /detect failed: %s", e)
+        return dict(EMPTY_DET)
+    if isinstance(d, dict) and "error" in d:
+        logger.warning("iacore /detect returned an error: %s", d["error"])
+        return dict(EMPTY_DET)
+    return d
+
+
+async def _detect_and_fanout(jpeg: bytes) -> None:
+    """Detect on ONE frame, then hand that same frame and its boxes to the
+    annotated viewers. Runs as a task precisely so the producer loop does not
+    await it: awaiting here is what used to put iacore's latency on the drive view."""
+    hub.fanout_annotated(jpeg, await _detect(jpeg))
+
+
+@app.post("/api/detect")
+async def detect(request: Request):
+    """Boxes for ONE frame the caller already has. JPEG in, detections out.
+
+    It lives here, next to `_detect`, because it answers with the same session
+    params (model/conf/imgsz/classes) that the producers use — point it at a frame
+    and it is analysed exactly as the live path would analyse it.
+
+    It exists because of the H.264 transport: that picture goes browser <-> mediamtx
+    and never reaches this gateway, so the gateway CANNOT pair it. The browser has
+    to, and to do that it needs somewhere to send a frame that gives back only the
+    answer.
+
+    NOT /ws/detect, and this is a trap worth naming: that endpoint fans the frames
+    it receives out to every monitor, so uploading grabs through it would put the
+    live machine's screen onto the drive machine's — replacing the robot picture
+    for the operator."""
+    body = await _bounded_body(request, MAX_DETECT_BODY)
+    if body is None:
+        return JSONResponse({"error": "frame too large"}, status_code=413)
+    return await proxy_json(
+        client.post("/detect", content=body, params=_detect_params(hub.config))
+    )
 
 
 class RobotCamState:
@@ -740,7 +837,11 @@ async def ws_detect(ws: WebSocket):
                 await conn.send({"type": "error", "message": d["error"]})
             else:
                 await conn.send({"type": "detections", **d})
-                hub.fanout(data, d)
+                # The phone awaits its own detection, so this frame is ALREADY
+                # paired: annotated viewers get the pair, raw viewers get the
+                # picture with no boxes on it.
+                hub.fanout_raw(data)
+                hub.fanout_annotated(data, d)
     except WebSocketDisconnect:
         pass
     finally:
@@ -778,6 +879,11 @@ async def ws_view(ws: WebSocket):
                 upd = json.loads(text)
             except json.JSONDecodeError:
                 continue
+            # `boxes` is THIS connection's intent and never enters the shared
+            # config. That separation is the fix for the drive view switching
+            # detection off for everyone every time it reconnected.
+            if isinstance(upd.get("boxes"), bool):
+                conn.wants_boxes = upd["boxes"]
             hub.apply_config(upd, origin=conn)
     except WebSocketDisconnect:
         pass
@@ -858,16 +964,24 @@ async def ws_view_h264(ws: WebSocket):
 @app.websocket("/ws/robot-cam")
 async def ws_robot_cam(ws: WebSocket):
     """Robot-camera producer (the camera bridge connects here). Each binary JPEG
-    frame is fanned out to the monitors (/ws/view).
+    frame goes out on TWO paths, and which path a viewer sits on is its own choice.
 
-    YOLO is OPT-IN and shared: when the session's `enabled` flag is off (the
-    default) frames are relayed straight through with EMPTY detections, for a
-    minimum-latency view and zero GPU use. When it's on, each frame is first sent
-    to iacore's /detect (same model/conf/imgsz/classes as the phone) and fanned
-    out WITH the boxes — so the robot video can show detections too."""
+    RAW viewers — the drive view, and the live view with YOLO off — are served
+    FIRST and are never made to wait for anything. This loop does not await
+    detection any more: it used to, and that put iacore's cost (12 ms at 480x270,
+    25 ms at 1080p, measured) on the drive view of an operator who had not asked
+    for boxes and had nothing in the UI telling them why.
+
+    ANNOTATED viewers get a frame only once ITS OWN boxes are ready, so a box can
+    never describe a moment the picture does not show. They therefore receive
+    fewer frames — the detection rate — which is the intended trade.
+
+    While a detection is in flight the next frames are SKIPPED, not queued. A
+    queue is how latency accumulates; skipping is the same discipline
+    `_put_latest` already enforces one layer down."""
     await ws.accept()
-    empty = {"objects": [], "n": 0, "elapsed_ms": 0}
     robot_cam.attached += 1
+    detect_task: asyncio.Task | None = None
     try:
         while True:
             msg = await ws.receive()
@@ -877,21 +991,18 @@ async def ws_robot_cam(ws: WebSocket):
             if not data:
                 continue  # ignore any text/config; this producer only sends frames
             robot_cam.frame()
-            det = empty
-            if hub.config.get("enabled"):
-                try:
-                    r = await client.post(
-                        "/detect", content=data, params=_detect_params(hub.config))
-                    d = r.json()
-                    if not (isinstance(d, dict) and "error" in d):
-                        det = d
-                except Exception as e:
-                    logger.warning("iacore /detect (robot-cam) failed: %s", e)
-            hub.fanout(data, det)
+            hub.fanout_raw(data)
+            if not hub.wants_boxes():
+                continue  # nobody asked: iacore is not called at all
+            if detect_task is not None and not detect_task.done():
+                continue  # one in flight is the cap
+            detect_task = asyncio.create_task(_detect_and_fanout(data))
     except WebSocketDisconnect:
         pass
     finally:
         robot_cam.attached = max(0, robot_cam.attached - 1)
+        if detect_task is not None and not detect_task.done():
+            detect_task.cancel()
 
 
 # --------------------------------------------------------------------------- #
