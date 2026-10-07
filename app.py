@@ -165,6 +165,8 @@ class RobotVideoConfig(BaseModel):
     fps: float | None = None       # cap for HTTP viewers; 0 = every frame
     width: int | None = None       # downscale width; 0 = native, no re-encode at all
     quality: int | None = None     # JPEG quality, only meaningful when width > 0
+    h264_qp: int | None = None     # drive view (all-intra H.264): lower = sharper, bigger
+    h264_width: int | None = None  # drive view width; the robot derives the 16:9 height
     # Saved only — the gst pipeline reads these at launch, so they need a restart of the
     # robot's video service. The relay refuses them unless persist is set, because a knob
     # that silently does nothing is worse than one that says no.
