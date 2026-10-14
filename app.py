@@ -1085,8 +1085,8 @@ async def ws_robot_cam(ws: WebSocket):
 #
 # Newest-wins, per viewer: a viewer that falls behind gets the latest line, never a backlog
 # (engineering standard §3). Nothing a viewer sends is acted on — there is no command path
-# here; moving joints is step J2 of .claude/roadmap/G1-CONTROL-ARTICULAR.md, and it will not
-# be added to this read-only socket.
+# here. Moving joints has its own socket, /ws/joint-control below, so that WATCHING can never
+# move anything.
 # --------------------------------------------------------------------------- #
 # Read timeout well above the relay's 1 s heartbeat: a silent upstream for this long is a
 # dead link, not a still robot.
@@ -1154,6 +1154,137 @@ async def ws_joints(ws: WebSocket, robot: str = "g1"):
             await ws.close()
         except RuntimeError:
             pass        # already closed by the browser
+
+
+# --------------------------------------------------------------------------- #
+# Joint control (the Joints page) — MOVES the robot's arm joints.
+#
+#   browser --WS /ws/joint-control--> THIS --POST--> executor --POST--> relay --> g1_joint_sender
+#
+# Every limit is on the robot (src/joint_ctl_core.hpp in robot-command-relay). What this socket
+# adds is a LIFETIME: the relay's session id is kept HERE, never sent to the browser, and when
+# the socket closes for any reason — tab closed, network gone, page navigated away — the
+# session is released. A browser cannot leave an arm held behind it.
+#
+# The browser sends {"op": "take" | "target" | "keepalive" | "status" | "release", joint?, q?}
+# and gets back {"op", "status", ...the relay's answer}. Requests go upstream one at a time;
+# while one is in flight a newer TARGET replaces the waiting one (newest wins — a dragged
+# slider wants where it is now, not where it was), and repeated keepalives collapse into one.
+# --------------------------------------------------------------------------- #
+# `take` waits on the robot (the sender joins DDS and reads it once): up to ~10 s upstream.
+JOINT_CONTROL_TIMEOUT = httpx.Timeout(connect=3.0, read=12.0, write=5.0, pool=3.0)
+JOINT_CONTROL_OPS = ("take", "target", "keepalive", "status", "release")
+
+
+class _JointControlLink:
+    """One browser's control socket: its pending requests and the relay session it holds."""
+
+    def __init__(self, robot: str):
+        self.robot = robot
+        self.session: str | None = None
+        self.pending: dict = {}             # op -> latest request; one slot per op
+        self.wake = asyncio.Event()
+
+    def submit(self, msg: dict) -> None:
+        self.pending[msg["op"]] = msg       # a newer target (or keepalive) replaces the older
+        self.wake.set()
+
+    def next_request(self) -> "dict | None":
+        # A release goes first, always; then take; then the newest target; then the rest.
+        for op in ("release", "take", "target", "keepalive", "status"):
+            if op in self.pending:
+                return self.pending.pop(op)
+        return None
+
+    async def call(self, ec: httpx.AsyncClient, msg: dict) -> "tuple[int, dict]":
+        body = {k: msg[k] for k in ("op", "joint", "q") if k in msg}
+        if msg["op"] != "take":
+            body["session"] = self.session
+        try:
+            r = await ec.post(f"{EXECUTOR_URL}/joints/control", params={"robot": self.robot},
+                              json=body)
+            out = r.json()
+            status = r.status_code
+        except Exception as e:
+            return 502, {"ok": False, "error": f"robot executor unreachable: {e}"}
+        if not isinstance(out, dict):
+            return 502, {"ok": False, "error": "bad answer from the executor"}
+        if msg["op"] == "take" and status == 200 and out.get("session"):
+            self.session = out.pop("session")
+        out.pop("session", None)
+        # Only once the relay says the session is OVER — not when a release is asked for: the
+        # hand-back ramp takes ~2 s, and the keepalives during it are how the page sees it end.
+        if out.get("state") == "off" or (status == 409 and out.get("error") == "no control session"):
+            self.session = None
+        return status, out
+
+
+# Releases in flight, held so the event loop does not drop a task nobody awaits any more.
+_JOINT_RELEASES: "set[asyncio.Task]" = set()
+
+
+async def _release_joint_control(link: _JointControlLink) -> None:
+    async with httpx.AsyncClient(timeout=JOINT_CONTROL_TIMEOUT) as ec:
+        status, out = await link.call(ec, {"op": "release"})
+    logger.info("joint control: socket closed, released (%s %s)", status,
+                out.get("reply") or out.get("error"))
+
+
+@app.websocket("/ws/joint-control")
+async def ws_joint_control(ws: WebSocket, robot: str = "g1"):
+    """Move the G1's arm joints from the Joints page. Closing this socket releases the arms."""
+    await ws.accept()
+    link = _JointControlLink(robot)
+
+    async def recv_loop() -> None:
+        while True:
+            raw = await ws.receive()
+            if raw.get("type") == "websocket.disconnect":
+                return
+            try:
+                msg = json.loads(raw.get("text") or "")
+            except ValueError:
+                continue
+            if isinstance(msg, dict) and msg.get("op") in JOINT_CONTROL_OPS:
+                link.submit(msg)
+
+    async def work_loop(ec: httpx.AsyncClient) -> None:
+        while True:
+            await link.wake.wait()
+            link.wake.clear()
+            while (msg := link.next_request()) is not None:
+                if msg["op"] != "take" and link.session is None:
+                    await ws.send_text(json.dumps({"op": msg["op"], "status": 409, "ok": False,
+                                                   "error": "no control session",
+                                                   "state": "off"}))
+                    continue
+                status, out = await link.call(ec, msg)
+                await ws.send_text(json.dumps({"op": msg["op"], "status": status, **out}))
+
+    async with httpx.AsyncClient(timeout=JOINT_CONTROL_TIMEOUT) as ec:
+        tasks = {asyncio.create_task(recv_loop()), asyncio.create_task(work_loop(ec))}
+        try:
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        except (WebSocketDisconnect, RuntimeError):
+            pass
+        finally:
+            for t in tasks:
+                t.cancel()
+            # Whatever ended the socket, the arms go back to the robot's own controller. Its
+            # own task, shielded: when the server cancels this handler (a disconnect can do
+            # that), the release must still go out rather than be cancelled with it.
+            if link.session is not None:
+                release = asyncio.create_task(_release_joint_control(link))
+                _JOINT_RELEASES.add(release)
+                release.add_done_callback(_JOINT_RELEASES.discard)
+                try:
+                    await asyncio.shield(release)
+                except (asyncio.CancelledError, Exception):
+                    pass
+            try:
+                await ws.close()
+            except RuntimeError:
+                pass
 
 
 # --------------------------------------------------------------------------- #
