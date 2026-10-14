@@ -124,6 +124,17 @@ class SpeakRequest(BaseModel):
     voice: str | None = None
 
 
+class RobotSayRequest(BaseModel):
+    robot: str = "go2"
+    text: str = ""
+    voice: str | None = None
+
+
+class RobotVolumeRequest(BaseModel):
+    robot: str = "go2"
+    level: int
+
+
 class CommandRequest(BaseModel):
     text: str = ""
     image: str | None = None
@@ -525,6 +536,61 @@ async def speak(req: SpeakRequest):
     except Exception as e:
         logger.warning("iacore /speak failed: %s", e)
         return JSONResponse({"error": f"iacore unreachable: {e}"}, status_code=502)
+
+
+# --------------------------------------------------------------------------- #
+# The robot's own speaker. The voice is made HERE (iacore's Piper, the same voice the browser
+# plays) and the robot only plays it: one TTS for both outputs, and nothing to install on the
+# robot. The executor adds the relay token; the relay validates the WAV and the volume.
+# --------------------------------------------------------------------------- #
+async def _executor_audio(method: str, path: str, robot: str, content: bytes = b"",
+                          ctype: str = "application/json") -> JSONResponse:
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=3.0, read=25.0, write=10.0, pool=3.0)
+        ) as ec:
+            r = await ec.request(method, f"{EXECUTOR_URL}{path}", params={"robot": robot},
+                                 content=content or None, headers={"Content-Type": ctype})
+        return JSONResponse(r.json(), status_code=r.status_code)
+    except Exception as e:
+        logger.warning("robot executor unreachable: %s", e)
+        return JSONResponse(
+            {"ok": False, "error": f"robot executor unreachable: {e}"}, status_code=502)
+
+
+@app.post("/api/robot-audio/say")
+async def robot_say(req: RobotSayRequest):
+    """Say `text` through the robot's speaker. Replies once the robot has the audio, with
+    how long it will play — not when it finishes."""
+    text = req.text.strip()
+    if not text:
+        return JSONResponse({"ok": False, "error": "empty text"}, status_code=400)
+    try:
+        r = await client.post("/speak", json={"text": text, "voice": req.voice})
+    except Exception as e:
+        logger.warning("iacore /speak failed: %s", e)
+        return JSONResponse({"ok": False, "error": f"iacore unreachable: {e}"},
+                            status_code=502)
+    if r.status_code != 200 or not r.content.startswith(b"RIFF"):
+        return JSONResponse({"ok": False, "error": f"TTS failed: HTTP {r.status_code}"},
+                            status_code=502)
+    return await _executor_audio("POST", "/audio/say", req.robot, r.content, "audio/wav")
+
+
+@app.post("/api/robot-audio/stop")
+async def robot_audio_stop(robot: str = "go2"):
+    return await _executor_audio("POST", "/audio/stop", robot)
+
+
+@app.get("/api/robot-audio/volume")
+async def robot_volume(robot: str = "go2"):
+    return await _executor_audio("GET", "/audio/volume", robot)
+
+
+@app.post("/api/robot-audio/volume")
+async def set_robot_volume(req: RobotVolumeRequest):
+    return await _executor_audio("POST", "/audio/volume", req.robot,
+                                 json.dumps({"level": req.level}).encode())
 
 
 # --------------------------------------------------------------------------- #
