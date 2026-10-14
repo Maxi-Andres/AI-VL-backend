@@ -167,6 +167,7 @@ class RobotVideoConfig(BaseModel):
     quality: int | None = None     # JPEG quality, only meaningful when width > 0
     h264_qp: int | None = None     # drive view (all-intra H.264): lower = sharper, bigger
     h264_width: int | None = None  # drive view width; the robot derives the 16:9 height
+    camera: str | None = None      # front | rs_color | rs_depth: the ONE camera sent
     # Saved only — the gst pipeline reads these at launch, so they need a restart of the
     # robot's video service. The relay refuses them unless persist is set, because a knob
     # that silently does nothing is worse than one that says no.
