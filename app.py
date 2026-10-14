@@ -1008,6 +1008,88 @@ async def ws_robot_cam(ws: WebSocket):
 
 
 # --------------------------------------------------------------------------- #
+# Joint state (the Joints page) — READ-ONLY.
+#
+#   browser --WS /ws/joints--> THIS --HTTP stream--> executor --HTTP stream--> relay on PC2
+#
+# Each line is the robot's joint state as g1_joint_bridge printed it (robot-command-relay),
+# passed through untouched: this gateway does not parse it, so the format has one owner.
+# The executor holds the relay token, so it never reaches this process or the browser.
+#
+# Newest-wins, per viewer: a viewer that falls behind gets the latest line, never a backlog
+# (engineering standard §3). Nothing a viewer sends is acted on — there is no command path
+# here; moving joints is step J2 of .claude/roadmap/G1-CONTROL-ARTICULAR.md, and it will not
+# be added to this read-only socket.
+# --------------------------------------------------------------------------- #
+# Read timeout well above the relay's 1 s heartbeat: a silent upstream for this long is a
+# dead link, not a still robot.
+JOINT_STREAM_TIMEOUT = httpx.Timeout(connect=5.0, read=8.0, write=5.0, pool=5.0)
+
+
+async def _pump_joint_stream(robot: str, q: "asyncio.Queue") -> None:
+    """Upstream lines (str) into `q`, newest wins. Always ends with ONE final dict saying why
+    the stream stopped, so the page can show it instead of a bare disconnect."""
+    final = {"error": "the robot's joint stream ended"}
+    try:
+        async with (
+            httpx.AsyncClient(timeout=JOINT_STREAM_TIMEOUT) as ec,
+            ec.stream("GET", f"{EXECUTOR_URL}/joints/stream", params={"robot": robot}) as r,
+        ):
+            if r.status_code != 200:
+                raw = (await r.aread())[:500]
+                try:
+                    detail = json.loads(raw).get("error") or raw.decode("utf-8", "replace")
+                except ValueError:
+                    detail = raw.decode("utf-8", "replace")
+                final = {"error": detail, "status": r.status_code}
+                return
+            async for line in r.aiter_lines():
+                if line.startswith("{"):
+                    _put_latest(q, line)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        final = {"error": f"robot executor unreachable: {e}"}
+    finally:
+        _put_latest(q, {**final, "final": True})
+
+
+@app.websocket("/ws/joints")
+async def ws_joints(ws: WebSocket, robot: str = "g1"):
+    """The Joints page's live feed: one text message per robot tick, newest wins. The last
+    message before the socket closes is {"error": ..., "final": true}; the page reconnects."""
+    await ws.accept()
+    q: asyncio.Queue = asyncio.Queue(maxsize=1)
+    pump = asyncio.create_task(_pump_joint_stream(robot, q))
+
+    async def send_loop() -> None:
+        while True:
+            item = await q.get()
+            if isinstance(item, dict):          # the final message: say why, then stop
+                await ws.send_text(json.dumps(item))
+                return
+            await ws.send_text(item)
+
+    async def recv_loop() -> None:
+        # Only here to notice the browser leaving; what it sends is ignored (read-only).
+        while (await ws.receive()).get("type") != "websocket.disconnect":
+            pass
+
+    tasks = {asyncio.create_task(send_loop()), asyncio.create_task(recv_loop())}
+    try:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    except (WebSocketDisconnect, RuntimeError):
+        pass
+    finally:
+        for t in (*tasks, pump):
+            t.cancel()
+        try:
+            await ws.close()
+        except RuntimeError:
+            pass        # already closed by the browser
+
+
+# --------------------------------------------------------------------------- #
 # Presence: WHO is attached right now. This gateway is the only process that sees
 # every participant (the robot-camera bridge, the browsers on the hub) and can
 # reach the sidecars, so it aggregates the facts here and the UI renders one pill
