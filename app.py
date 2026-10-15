@@ -1166,14 +1166,16 @@ async def ws_joints(ws: WebSocket, robot: str = "g1"):
 # the socket closes for any reason — tab closed, network gone, page navigated away — the
 # session is released. A browser cannot leave an arm held behind it.
 #
-# The browser sends {"op": "take" | "target" | "keepalive" | "status" | "release", joint?, q?}
-# and gets back {"op", "status", ...the relay's answer}. Requests go upstream one at a time;
-# while one is in flight a newer TARGET replaces the waiting one (newest wins — a dragged
-# slider wants where it is now, not where it was), and repeated keepalives collapse into one.
+# The browser sends {"op": "take" | "target" | "hand" | "keepalive" | "status" | "release",
+# joint?, q?, side?, finger?, pos?} and gets back {"op", "status", ...the relay's answer}.
+# Requests go upstream one at a time. While one is in flight, a newer target for the SAME joint
+# (or finger) replaces the waiting one — newest wins, a dragged slider wants where it is now —
+# but targets for different joints all go ("everything back to where it started" sends fifteen
+# at once; until 2026-10-15 one slot per op kept only the last of them). Keepalives collapse.
 # --------------------------------------------------------------------------- #
 # `take` waits on the robot (the sender joins DDS and reads it once): up to ~10 s upstream.
 JOINT_CONTROL_TIMEOUT = httpx.Timeout(connect=3.0, read=12.0, write=5.0, pool=3.0)
-JOINT_CONTROL_OPS = ("take", "target", "keepalive", "status", "release")
+JOINT_CONTROL_OPS = ("take", "target", "hand", "keepalive", "status", "release")
 
 
 class _JointControlLink:
@@ -1182,22 +1184,39 @@ class _JointControlLink:
     def __init__(self, robot: str):
         self.robot = robot
         self.session: str | None = None
-        self.pending: dict = {}             # op -> latest request; one slot per op
+        self.pending: dict = {}             # slot -> latest request (see _slot)
         self.wake = asyncio.Event()
 
+    @staticmethod
+    def _slot(msg: dict) -> tuple:
+        if msg["op"] == "target":
+            return ("target", str(msg.get("joint")))
+        if msg["op"] == "hand":
+            return ("hand", str(msg.get("side")), str(msg.get("finger")))
+        return (msg["op"],)
+
     def submit(self, msg: dict) -> None:
-        self.pending[msg["op"]] = msg       # a newer target (or keepalive) replaces the older
+        slot = self._slot(msg)
+        self.pending.pop(slot, None)        # newest wins, and goes to the back of the queue
+        self.pending[slot] = msg
         self.wake.set()
 
     def next_request(self) -> "dict | None":
-        # A release goes first, always; then take; then the newest target; then the rest.
-        for op in ("release", "take", "target", "keepalive", "status"):
-            if op in self.pending:
-                return self.pending.pop(op)
+        # A release goes first, always; then take; then targets and fingers in the order they
+        # came; then the rest.
+        for slot in (("release",), ("take",)):
+            if slot in self.pending:
+                return self.pending.pop(slot)
+        for slot in list(self.pending):
+            if slot[0] in ("target", "hand"):
+                return self.pending.pop(slot)
+        for slot in (("keepalive",), ("status",)):
+            if slot in self.pending:
+                return self.pending.pop(slot)
         return None
 
     async def call(self, ec: httpx.AsyncClient, msg: dict) -> "tuple[int, dict]":
-        body = {k: msg[k] for k in ("op", "joint", "q") if k in msg}
+        body = {k: msg[k] for k in ("op", "joint", "q", "side", "finger", "pos") if k in msg}
         if msg["op"] != "take":
             body["session"] = self.session
         try:

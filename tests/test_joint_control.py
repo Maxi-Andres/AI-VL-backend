@@ -151,6 +151,27 @@ def test_a_burst_of_targets_sends_the_newest(tc, executor):
         assert len(targets) < 4, "the ones overtaken while waiting were dropped"
 
 
+def test_targets_for_different_joints_all_go(tc, executor):
+    """"Everything back to where it started" sends one target per joint at once: until
+    2026-10-15 a single slot per op kept only the last of them."""
+    executor.slow = 0.2
+    with tc.websocket_connect("/ws/joint-control?robot=g1") as ws:
+        ws.send_text(json.dumps({"op": "take"}))
+        recv(ws)
+        joints = ["left_elbow", "right_elbow", "waist_yaw", "left_wrist_roll"]
+        for j in joints:
+            ws.send_text(json.dumps({"op": "target", "joint": j, "q": 0.1}))
+        ws.send_text(json.dumps({"op": "hand", "side": "left", "finger": 2, "pos": 300}))
+        ws.send_text(json.dumps({"op": "hand", "side": "left", "finger": 3, "pos": 400}))
+        for _ in range(6):
+            recv(ws)
+        sent = [b.get("joint") for b in executor.seen if b["op"] == "target"]
+        assert sorted(sent) == sorted(joints)
+        hands = [(b["side"], b["finger"], b["pos"]) for b in executor.seen if b["op"] == "hand"]
+        assert sorted(hands) == [("left", 2, 300), ("left", 3, 400)]
+        assert all(b["session"] == SESSION for b in executor.seen if b["op"] != "take")
+
+
 def test_junk_is_ignored(tc, executor):
     with tc.websocket_connect("/ws/joint-control?robot=g1") as ws:
         ws.send_text("not json")
