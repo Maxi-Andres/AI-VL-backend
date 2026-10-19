@@ -1186,6 +1186,17 @@ async def ws_joints(ws: WebSocket, robot: str = "g1"):
 # Audio only flows here and to iacore; the browser gets text.
 # --------------------------------------------------------------------------- #
 EAR_TIMEOUT = httpx.Timeout(connect=3.0, read=10.0, write=5.0, pool=3.0)
+# ONE ear per robot. Two pages listening (two tabs, a phone and a PC) each answered every
+# command, and switching the mic off in one left the robot listening through the other
+# (2026-10-19). A new page takes the ear from the old one, and {"type": "off"} from any page
+# switches it off for all of them: like a physical switch.
+_ears: dict = {}                     # robot -> {asyncio.Event: reason}, one per open socket
+
+
+def _stop_ears(robot: str, reason: str) -> None:
+    for stop in list(_ears.get(robot, {})):
+        _ears[robot][stop] = reason
+        stop.set()
 IACORE_WS_URL = os.environ.get("IACORE_WS_URL", "ws" + IACORE_URL[4:]
                                if IACORE_URL.startswith("http") else IACORE_URL)
 
@@ -1199,6 +1210,9 @@ def _ear_connect():
 async def ws_robot_ear(ws: WebSocket, robot: str = "g1"):
     await ws.accept()
     final = {"type": "error", "error": "the robot's microphone stream ended"}
+    _stop_ears(robot, "another page took the robot's microphone")
+    stop = asyncio.Event()
+    _ears.setdefault(robot, {})[stop] = ""
     try:
         async with (
             httpx.AsyncClient(timeout=EAR_TIMEOUT) as ec,
@@ -1243,10 +1257,14 @@ async def ws_robot_ear(ws: WebSocket, robot: str = "g1"):
                         if isinstance(control, dict) and control.get("type") == "mute":
                             await ear.send(json.dumps({"type": "mute",
                                                        "on": bool(control.get("on"))}))
+                        elif isinstance(control, dict) and control.get("type") == "off":
+                            _stop_ears(robot, "the robot's microphone was switched off")
+                            return
 
                 tasks = {asyncio.create_task(mic_to_ear()),
                          asyncio.create_task(ear_to_browser()),
-                         asyncio.create_task(browser_to_ear())}
+                         asyncio.create_task(browser_to_ear()),
+                         asyncio.create_task(stop.wait())}
                 done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
                 for t in pending:
                     t.cancel()
@@ -1254,6 +1272,9 @@ async def ws_robot_ear(ws: WebSocket, robot: str = "g1"):
                     if not left.is_set() and not t.cancelled() and t.exception() is not None:
                         final = {"type": "error", "error": f"the robot's ear stopped: "
                                                            f"{t.exception()}"}
+                if stop.is_set():
+                    final = {"type": "error", "error": _ears.get(robot, {}).get(stop) or
+                             "the robot's microphone was switched off"}
             finally:
                 await ear_cm.__aexit__(None, None, None)
     except asyncio.CancelledError:
@@ -1261,6 +1282,7 @@ async def ws_robot_ear(ws: WebSocket, robot: str = "g1"):
     except Exception as e:
         final = {"type": "error", "error": f"robot executor unreachable: {e}"}
     finally:
+        _ears.get(robot, {}).pop(stop, None)
         try:
             await ws.send_text(json.dumps(final))
             await ws.close()

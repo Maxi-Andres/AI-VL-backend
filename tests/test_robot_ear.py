@@ -162,3 +162,37 @@ def test_a_page_leaving_releases_the_robots_mic(tc, executor, ear):
     with tc.websocket_connect("/ws/robot-ear?robot=g1") as ws:
         recv(ws)
     assert executor.hung_up.wait(5), "the upstream stream must close when the page leaves"
+
+
+# --------------------------------------------------------------------------- #
+# One ear per robot (2026-10-19: two tabs both answered, and switching one off left the robot
+# listening through the other)
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def quiet_ears(monkeypatch):
+    made = []
+
+    def factory():
+        made.append(FakeEar([]))
+        return made[-1]
+    monkeypatch.setattr(gateway, "_ear_connect", factory)
+    return made
+
+
+def test_a_new_page_takes_the_ear_from_the_old_one(tc, executor, quiet_ears):
+    with tc.websocket_connect("/ws/robot-ear?robot=g1") as first:
+        assert recv(first)["type"] == "listening"
+        with tc.websocket_connect("/ws/robot-ear?robot=g1") as second:
+            msg = recv(first)
+            assert msg["type"] == "error" and "another page" in msg["error"]
+            assert recv(second)["type"] == "listening"
+
+
+def test_off_from_one_page_switches_the_mic_off_for_every_page(tc, executor, quiet_ears):
+    with tc.websocket_connect("/ws/robot-ear?robot=g1") as page:
+        assert recv(page)["type"] == "listening"
+        page.send_text(json.dumps({"type": "off"}))
+        msg = recv(page)
+    assert msg["type"] == "error" and "switched off" in msg["error"]
+    assert executor.hung_up.wait(5), "off must close the robot's mic stream"
+    assert gateway._ears.get("g1") == {}
