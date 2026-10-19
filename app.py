@@ -38,6 +38,7 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
+from websockets.asyncio.client import connect as ws_connect
 
 IACORE_URL = os.environ.get("IACORE_URL", "http://localhost:8001").rstrip("/")
 # The robot executor (ROS2 skill executor) — a separate service, usually the
@@ -1154,6 +1155,101 @@ async def ws_joints(ws: WebSocket, robot: str = "g1"):
             await ws.close()
         except RuntimeError:
             pass        # already closed by the browser
+
+
+# --------------------------------------------------------------------------- #
+# The robot's ear (G1): its own microphone, listened to Alexa-style.
+#
+#   robot mic --relay--> executor --HTTP stream--> THIS --WS binary--> iacore /ws/ear
+#   iacore's events (speech / heard / wake / command) --> THIS --WS text--> browser
+#
+# The page's "robot mic" switch IS this socket: opening it opens the robot's microphone (the
+# relay turns mic mode on for an open stream) and closing it closes it, at once. The page's
+# {"type": "mute", "on": bool} goes on to iacore, so the ear is deaf while the robot speaks and
+# never answers its own voice. The socket's last message is {"type": "error", "error": why}.
+# Audio only flows here and to iacore; the browser gets text.
+# --------------------------------------------------------------------------- #
+EAR_TIMEOUT = httpx.Timeout(connect=3.0, read=10.0, write=5.0, pool=3.0)
+IACORE_WS_URL = os.environ.get("IACORE_WS_URL", "ws" + IACORE_URL[4:]
+                               if IACORE_URL.startswith("http") else IACORE_URL)
+
+
+def _ear_connect():
+    """The WebSocket to iacore's ear. A function so the tests can put a fake there."""
+    return ws_connect(f"{IACORE_WS_URL}/ws/ear", max_size=2**20, open_timeout=5)
+
+
+@app.websocket("/ws/robot-ear")
+async def ws_robot_ear(ws: WebSocket, robot: str = "g1"):
+    await ws.accept()
+    final = {"type": "error", "error": "the robot's microphone stream ended"}
+    try:
+        async with (
+            httpx.AsyncClient(timeout=EAR_TIMEOUT) as ec,
+            ec.stream("GET", f"{EXECUTOR_URL}/audio/mic/stream", params={"robot": robot}) as r,
+        ):
+            if r.status_code != 200:
+                raw = (await r.aread())[:500]
+                try:
+                    detail = json.loads(raw).get("error") or raw.decode("utf-8", "replace")
+                except ValueError:
+                    detail = raw.decode("utf-8", "replace")
+                final = {"type": "error", "error": detail, "status": r.status_code}
+                return
+            try:
+                ear_cm = _ear_connect()
+                ear = await ear_cm.__aenter__()
+            except Exception as e:
+                final = {"type": "error", "error": f"speech-to-text (iacore) unreachable: {e}"}
+                return
+            try:
+                await ws.send_text(json.dumps({"type": "listening", "robot": robot}))
+                left = asyncio.Event()
+
+                async def mic_to_ear() -> None:
+                    async for chunk in r.aiter_bytes():
+                        await ear.send(chunk)
+
+                async def ear_to_browser() -> None:
+                    async for msg in ear:
+                        await ws.send_text(msg if isinstance(msg, str) else msg.decode())
+
+                async def browser_to_ear() -> None:
+                    while True:
+                        msg = await ws.receive()
+                        if msg.get("type") == "websocket.disconnect":
+                            left.set()
+                            return
+                        try:
+                            control = json.loads(msg.get("text") or "")
+                        except ValueError:
+                            continue
+                        if isinstance(control, dict) and control.get("type") == "mute":
+                            await ear.send(json.dumps({"type": "mute",
+                                                       "on": bool(control.get("on"))}))
+
+                tasks = {asyncio.create_task(mic_to_ear()),
+                         asyncio.create_task(ear_to_browser()),
+                         asyncio.create_task(browser_to_ear())}
+                done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                for t in pending:
+                    t.cancel()
+                for t in done:
+                    if not left.is_set() and not t.cancelled() and t.exception() is not None:
+                        final = {"type": "error", "error": f"the robot's ear stopped: "
+                                                           f"{t.exception()}"}
+            finally:
+                await ear_cm.__aexit__(None, None, None)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        final = {"type": "error", "error": f"robot executor unreachable: {e}"}
+    finally:
+        try:
+            await ws.send_text(json.dumps(final))
+            await ws.close()
+        except (RuntimeError, WebSocketDisconnect):
+            pass        # the browser already left: nobody to tell
 
 
 # --------------------------------------------------------------------------- #
