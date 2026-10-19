@@ -110,6 +110,7 @@ class VlmRequest(BaseModel):
     num_ctx: int | None = None
     think: bool | None = None
     prompt: str | None = None
+    robot: str | None = None        # whose identity answers (iacore persona_for)
 
 
 class VlmStreamRequest(BaseModel):
@@ -118,6 +119,7 @@ class VlmStreamRequest(BaseModel):
     model: str | None = None
     max_tokens: int | None = None
     num_ctx: int | None = None
+    robot: str | None = None        # whose identity answers (iacore persona_for)
 
 
 class SpeakRequest(BaseModel):
