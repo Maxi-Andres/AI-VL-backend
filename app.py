@@ -481,6 +481,17 @@ async def robot_camera(action: str):
             {"ok": False, "error": f"camera bridge unreachable: {e}"}, status_code=502)
 
 
+@app.get("/api/robot-frame")
+async def robot_frame():
+    """The newest frame from the robot's camera, as JPEG — what the robot "sees" when the voice
+    assistant is asked something from a page that shows no video. 503 when the camera bridge
+    sent nothing in the last ROBOT_CAM_LIVE_WINDOW seconds: an old frame would be a lie."""
+    if not robot_cam.last_jpeg or not robot_cam.snapshot()["live"]:
+        return JSONResponse({"error": "no live frame from the robot's camera"}, status_code=503)
+    return Response(content=robot_cam.last_jpeg, media_type="image/jpeg",
+                    headers={"Cache-Control": "no-store"})
+
+
 @app.get("/api/robot-camera/status")
 async def robot_camera_status():
     try:
@@ -811,10 +822,13 @@ class RobotCamState:
         self.attached = 0
         self.frames = 0
         self.last_frame = 0.0
+        self.last_jpeg = b""          # the newest frame, for /api/robot-frame
 
-    def frame(self) -> None:
+    def frame(self, jpeg: bytes = b"") -> None:
         self.frames += 1
         self.last_frame = time.monotonic()
+        if jpeg:
+            self.last_jpeg = jpeg
 
     def snapshot(self) -> dict:
         live = bool(self.attached) and (
@@ -1062,7 +1076,7 @@ async def ws_robot_cam(ws: WebSocket):
             data = msg.get("bytes")
             if not data:
                 continue  # ignore any text/config; this producer only sends frames
-            robot_cam.frame()
+            robot_cam.frame(data)
             hub.fanout_raw(data)
             if not hub.wants_boxes():
                 continue  # nobody asked: iacore is not called at all
