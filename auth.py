@@ -133,6 +133,7 @@ POLICY: dict[tuple[str, str], str] = {
     ("POST", "/api/robot-video"): "configure",
     ("POST", "/api/robot-camera/config"): "configure",
     # configure, sites and robots (fleet.py).
+    ("GET", "/api/activity"): "configure",
     ("POST", "/api/sites"): "configure",
     ("PATCH", "/api/sites/{site_id}"): "configure",
     ("DELETE", "/api/sites/{site_id}"): "configure",

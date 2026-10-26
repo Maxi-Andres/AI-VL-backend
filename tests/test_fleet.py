@@ -84,3 +84,11 @@ def test_a_viewer_sees_but_cannot_change(owner):
     assert viewer.get("/api/fleet").status_code == 200
     assert viewer.post("/api/sites", json={"name": "Nope"}).status_code == 403
     assert viewer.post("/api/robots", json={"name": "Nope", "slot": "g1"}).status_code == 403
+
+
+def test_the_activity_feed(owner):
+    owner.post("/api/sites", json={"name": "Feed Site"})
+    feed = owner.get("/api/activity").json()
+    assert feed[0]["action"] == "fleet.site_created" and feed[0]["target"] == "Feed Site"
+    assert feed[0]["actor"] == "Ana Owner"
+    assert all(e["action"] != "auth.login" for e in feed)          # sign-ins stay out of it
