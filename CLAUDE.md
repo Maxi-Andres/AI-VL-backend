@@ -14,7 +14,8 @@ frontend (browser UI)  ──HTTP/WS──▶  THIS (backend)  ──HTTP──�
 
 It holds **NO** detection logic and **NO** model deps (no ultralytics/torch/pillow)
 — just FastAPI + `httpx`. The relaying lives in `app.py`; accounts and access live in
-`auth.py` (who may call what — `POLICY`, default deny), `db.py` (SQLite via SQLAlchemy) and
+`auth.py` (who may call what — `POLICY`, default deny), `team.py` (invitations, roles,
+password resets), `fleet.py` (sites, floor plans, robots), `db.py` (SQLite via SQLAlchemy) and
 `migrations/` (Alembic, applied on startup). **Every new route needs a `POLICY` entry** or it
 is refused; `tests/test_auth.py` fails until it has one. It is more than a plain
 proxy: it runs a **session Hub** where one phone produces frames on `/ws/detect`

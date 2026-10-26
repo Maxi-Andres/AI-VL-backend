@@ -23,10 +23,12 @@ from sqlalchemy import (
     JSON,
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     String,
     TypeDecorator,
+    UniqueConstraint,
     event,
 )
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
@@ -192,6 +194,45 @@ class PasswordReset(Base):
     expires_at: Mapped[datetime] = mapped_column(UTCDateTime)
     used_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+
+
+class Site(Base):
+    """A place where the company's robots work: a warehouse, a plant, a lab."""
+
+    __tablename__ = "sites"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    org_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("organizations.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(120))
+    timezone: Mapped[str] = mapped_column(String(64), default="UTC")
+    address: Mapped[str] = mapped_column(String(255), default="")
+    lat: Mapped[float | None] = mapped_column(Float, nullable=True)
+    lon: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # The floor plan is a file in PILOT_DATA_DIR/site-plans/, named by the site id; this is
+    # its media type, or empty when the site has none.
+    plan_type: Mapped[str] = mapped_column(String(32), default="")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+
+
+class Robot(Base):
+    """A robot the company owns. `slot` is how the running stack addresses it ("go2", "g1"):
+    the executor, the relay and the camera bridge know one robot per model today, so a slot
+    holds one robot per organization (see the two-robots decision in the roadmap)."""
+
+    __tablename__ = "robots"
+    __table_args__ = (UniqueConstraint("org_id", "slot", name="uq_robots_org_slot"),)
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    org_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("organizations.id", ondelete="CASCADE"), index=True
+    )
+    site_id: Mapped[str | None] = mapped_column(
+        String(32), ForeignKey("sites.id", ondelete="SET NULL"), nullable=True
+    )
+    name: Mapped[str] = mapped_column(String(80))
+    slot: Mapped[str] = mapped_column(String(16))
+    serial: Mapped[str] = mapped_column(String(80), default="")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
 
 class AuditEvent(Base):

@@ -109,6 +109,8 @@ POLICY: dict[tuple[str, str], str] = {
     ("WS", "/ws/view"): "view",
     ("WS", "/ws/view-h264"): "view",
     ("WS", "/ws/joints"): "view",
+    ("GET", "/api/fleet"): "view",
+    ("GET", "/api/sites/{site_id}/plan"): "view",
     # analyze — spend GPU on the models; nothing reaches the robot.
     ("POST", "/api/vlm"): "analyze",
     ("POST", "/api/vlm/stream"): "analyze",
@@ -130,6 +132,15 @@ POLICY: dict[tuple[str, str], str] = {
     ("POST", "/api/robot-transport"): "configure",
     ("POST", "/api/robot-video"): "configure",
     ("POST", "/api/robot-camera/config"): "configure",
+    # configure, sites and robots (fleet.py).
+    ("POST", "/api/sites"): "configure",
+    ("PATCH", "/api/sites/{site_id}"): "configure",
+    ("DELETE", "/api/sites/{site_id}"): "configure",
+    ("PUT", "/api/sites/{site_id}/plan"): "configure",
+    ("DELETE", "/api/sites/{site_id}/plan"): "configure",
+    ("POST", "/api/robots"): "configure",
+    ("PATCH", "/api/robots/{robot_id}"): "configure",
+    ("DELETE", "/api/robots/{robot_id}"): "configure",
     # ingest — machines pushing the robot's video in.
     ("WS", "/ws/robot-cam"): "ingest",
     ("WS", "/ws/robot-h264"): "ingest",
