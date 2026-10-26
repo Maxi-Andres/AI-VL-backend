@@ -22,6 +22,11 @@ Config via env:
                   also SERVES that SPA so the app + /api + /ws live on one origin
                   (used for the single-origin HTTPS deploy, e.g. phone access).
                   When unset, this app stays a pure gateway.
+    PILOT_DATA_DIR, DATABASE_URL, COOKIE_SECURE — accounts and sessions; see db.py and
+                  auth.py.
+
+Every route and WebSocket requires a signed-in person or a device key, per auth.POLICY
+(default deny). The only public paths are the sign-in flow and the SPA shell.
 
 Run (from the backend repo root, venv active):
     uvicorn app:app --host 0.0.0.0 --port 8000
@@ -34,11 +39,13 @@ import time
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from websockets.asyncio.client import connect as ws_connect
+
+import auth
 
 IACORE_URL = os.environ.get("IACORE_URL", "http://localhost:8001").rstrip("/")
 # The robot executor (ROS2 skill executor) — a separate service, usually the
@@ -77,6 +84,7 @@ client: httpx.AsyncClient
 @asynccontextmanager
 async def lifespan(app):
     global client
+    await auth.init()
     client = httpx.AsyncClient(
         base_url=IACORE_URL,
         timeout=httpx.Timeout(connect=5.0, read=320.0, write=30.0, pool=5.0),
@@ -87,10 +95,18 @@ async def lifespan(app):
         await client.aclose()
 
 
-app = FastAPI(title="backend — gateway", lifespan=lifespan)
+# auth.authorize runs before EVERY route and WebSocket, including the ones added later:
+# a route without an auth.POLICY entry is refused (and tests/test_auth.py fails).
+app = FastAPI(title="backend — gateway", lifespan=lifespan,
+              dependencies=[Depends(auth.authorize)])
+app.include_router(auth.router)
+# Credentials (the session cookie) only for origins named explicitly — never with "*". The
+# deploy is same-origin and needs no CORS at all; this is for the vite dev server on :5173,
+# which calls :8000 directly: run the gateway with CORS_ORIGINS=http://localhost:5173.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS or ["*"],
+    allow_credentials="*" not in CORS_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )

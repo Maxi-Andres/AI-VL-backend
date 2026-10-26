@@ -44,6 +44,26 @@ Check it can reach iacore: <http://localhost:8000/api/health>.
 | `CORS_ORIGINS`  | `*`                      | comma-separated browser origins allowed            |
 | `BACKEND_PORT`  | `8000`                   | informational; pass `--port` to uvicorn            |
 | `FRONTEND_DIST` | (unset)                  | path to the built SPA; when set, served on one origin |
+| `PILOT_DATA_DIR`| `~/.pilot`               | accounts database, first-run setup code, the camera bridge's device key (0700) |
+| `DATABASE_URL`  | SQLite in `PILOT_DATA_DIR` | SQLAlchemy async URL, e.g. Postgres later       |
+| `COOKIE_SECURE` | (auto: on over HTTPS)    | force the session cookie's Secure flag behind a TLS proxy |
+
+## Accounts and access
+
+Every route and WebSocket needs a signed-in person (session cookie) or a device key
+(`Authorization: Bearer pk_…`); who may call what is the `POLICY` table in `auth.py`, default
+deny, and `tests/test_auth.py` fails if a route has no entry. Roles per organization:
+viewer (watch) < operator (+ ask the AI, drive, act) < admin (+ robot/video settings, people)
+< owner.
+
+- **First run:** with no accounts the gateway writes a one-time setup code to
+  `~/.pilot/setup-code`; the app's setup screen asks for it, then creates the company and its
+  owner. It also writes the camera bridge's key to `~/.pilot/device-key`.
+- **Schema:** Alembic migrations in `migrations/`, applied on startup. New table or column:
+  `alembic revision -m "..."` from this directory, then edit the generated file.
+- **From the shell** (`pilot_admin.py`): list users, reset a password, create/revoke device keys.
+- **Dev with the vite server** (`:5173` calls `:8000` directly): start the gateway with
+  `CORS_ORIGINS=http://localhost:5173` so the browser may send the session cookie.
 
 ## Endpoints
 

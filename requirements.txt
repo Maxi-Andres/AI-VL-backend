@@ -6,3 +6,9 @@ httpx>=0.27
 # The client for iacore's /ws/ear (also pulled in by uvicorn[standard]; named because
 # app.py imports it directly).
 websockets>=12
+
+# Accounts (users, roles, sessions) — see db.py and auth.py.
+sqlalchemy[asyncio]>=2.0.40
+aiosqlite>=0.21
+alembic>=1.16
+argon2-cffi>=23.1

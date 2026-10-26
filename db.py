@@ -1,0 +1,200 @@
+"""db.py — the gateway's own small database: organizations, users, sessions, keys, audit.
+
+Everything else this app does is stateless relaying; this is the one thing it must remember.
+SQLite by default (one file, nothing to run), reached through SQLAlchemy so that moving to
+Postgres is a DATABASE_URL change, not a rewrite. The schema is owned by the Alembic
+migrations in `migrations/`, which run on startup — never `create_all` in production.
+
+The file lives OUTSIDE the repo tree (engineering standard §2: secrets and state live outside
+the repo), in PILOT_DATA_DIR (default ~/.pilot), created 0700.
+
+Config via env:
+    PILOT_DATA_DIR  where the database and the first-run setup code live (default ~/.pilot)
+    DATABASE_URL    full SQLAlchemy async URL; overrides the SQLite file in PILOT_DATA_DIR
+"""
+from __future__ import annotations
+
+import os
+import uuid
+from datetime import UTC, datetime
+from pathlib import Path
+
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    TypeDecorator,
+    event,
+)
+from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+DATA_DIR = Path(os.environ.get("PILOT_DATA_DIR", "~/.pilot")).expanduser()
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip() or (
+    f"sqlite+aiosqlite:///{DATA_DIR / 'pilot.db'}"
+)
+
+
+def sync_url(url: str = DATABASE_URL) -> str:
+    """The same database through a sync driver, for Alembic (it migrates synchronously)."""
+    return url.replace("+aiosqlite", "").replace("+asyncpg", "+psycopg")
+
+
+def ensure_data_dir() -> None:
+    DATA_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+
+def new_id() -> str:
+    return uuid.uuid4().hex
+
+
+def utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+class UTCDateTime(TypeDecorator):
+    """Timezone-aware UTC in Python on every backend. SQLite has no timezone type, so it
+    stores naive UTC and hands it back naive; this re-attaches UTC on the way out, so no
+    comparison anywhere ever mixes naive and aware datetimes."""
+
+    impl = DateTime(timezone=True)
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is not None and value.tzinfo is None:
+            raise ValueError("naive datetime stored; use db.utcnow()")
+        return value.astimezone(UTC) if value is not None else None
+
+    def process_result_value(self, value, dialect):
+        if value is not None and value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class Organization(Base):
+    """The customer company. One per install today; every row that belongs to a company
+    carries org_id anyway, so a multi-company deploy needs no schema change."""
+
+    __tablename__ = "organizations"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(120))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+
+
+class User(Base):
+    __tablename__ = "users"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    # Stored lowercased: the address is the login name, and case must not create two people.
+    email: Mapped[str] = mapped_column(String(254), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    password_hash: Mapped[str] = mapped_column(String(255))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    last_login_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+
+
+class Membership(Base):
+    """A user's role in an organization. The role is per company, not per user."""
+
+    __tablename__ = "memberships"
+    user_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    org_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("organizations.id", ondelete="CASCADE"), primary_key=True
+    )
+    role: Mapped[str] = mapped_column(String(16))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+
+
+class AuthSession(Base):
+    """A signed-in browser. The id is the SHA-256 of the cookie value, never the value
+    itself, so a copy of this table cannot be replayed as anyone's session."""
+
+    __tablename__ = "sessions"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    org_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("organizations.id", ondelete="CASCADE")
+    )
+    persistent: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime)
+    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    user_agent: Mapped[str] = mapped_column(String(255), default="")
+    ip: Mapped[str] = mapped_column(String(64), default="")
+
+
+class ApiKey(Base):
+    """A credential for a machine, not a person — today the camera bridge that pushes the
+    robot's video in. Only the SHA-256 is stored; the key is shown once, at creation."""
+
+    __tablename__ = "api_keys"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    org_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("organizations.id", ondelete="CASCADE")
+    )
+    name: Mapped[str] = mapped_column(String(80))
+    role: Mapped[str] = mapped_column(String(16))
+    key_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    # The first characters of the key, kept so a list of keys is recognizable.
+    prefix: Mapped[str] = mapped_column(String(16))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    last_used_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+
+
+class AuditEvent(Base):
+    """Who did what, when, from where. Append-only by convention: nothing updates or
+    deletes these rows."""
+
+    __tablename__ = "audit_events"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, index=True)
+    org_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    actor_user_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    actor_key_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    action: Mapped[str] = mapped_column(String(64))
+    target: Mapped[str] = mapped_column(String(255), default="")
+    ip: Mapped[str] = mapped_column(String(64), default="")
+    detail: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+engine: AsyncEngine = create_async_engine(DATABASE_URL)
+SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
+
+if engine.dialect.name == "sqlite":
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _sqlite_pragmas(dbapi_conn, _record):
+        # WAL: readers never block the writer (a login while sessions are being touched).
+        # foreign_keys: SQLite ignores ON DELETE CASCADE without it.
+        cur = dbapi_conn.cursor()
+        cur.execute("PRAGMA journal_mode=WAL")
+        cur.execute("PRAGMA foreign_keys=ON")
+        cur.close()
+
+
+def migrate() -> None:
+    """Bring the schema to the newest migration. Synchronous on purpose: it runs once, in a
+    worker thread, before the app accepts a request."""
+    from alembic import command
+    from alembic.config import Config
+
+    here = Path(__file__).resolve().parent
+    cfg = Config(str(here / "alembic.ini"))
+    cfg.set_main_option("script_location", str(here / "migrations"))
+    cfg.set_main_option("sqlalchemy.url", sync_url())
+    # Leave logging alone: uvicorn owns it, and alembic.ini's [loggers] would replace it.
+    cfg.attributes["skip_logging"] = True
+    command.upgrade(cfg, "head")
