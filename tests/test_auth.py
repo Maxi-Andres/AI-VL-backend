@@ -149,6 +149,39 @@ def test_sign_in_and_out(tc):
     tc.cookies.clear()
 
 
+def test_you_change_your_own_name_and_password(tc):
+    _owner_signed_in(tc)
+    _add_user("viewer", "pat@acme.example")
+    tc.cookies.clear()
+    login = {"email": "pat@acme.example", "password": PASSWORD}
+    assert tc.post("/api/auth/login", json=login).status_code == 200
+    elsewhere = tc.cookies.get(auth.COOKIE_NAME)                 # another browser of Pat's
+    tc.cookies.clear()
+    assert tc.post("/api/auth/login", json=login).status_code == 200
+    here = tc.cookies.get(auth.COOKIE_NAME)
+
+    assert tc.patch("/api/auth/me", json={"name": "  Pat Doe "}).json()["user"]["name"] == "Pat Doe"
+    assert tc.get("/api/auth/me").json()["user"]["name"] == "Pat Doe"   # not the cached name
+    assert tc.patch("/api/auth/me", json={"name": "   "}).status_code == 422
+
+    wrong = tc.post("/api/auth/password", json={"current_password": "nope" * 4,
+                                                "new_password": "a brand new password"})
+    assert wrong.status_code == 403
+    short = tc.post("/api/auth/password", json={"current_password": PASSWORD, "new_password": "short"})
+    assert short.status_code == 422
+    ok = tc.post("/api/auth/password", json={"current_password": PASSWORD,
+                                             "new_password": "a brand new password"})
+    assert ok.status_code == 200 and ok.json()["signed_out"] == 1
+    assert tc.get("/api/auth/me").status_code == 200             # this browser stays in
+    tc.cookies.set(auth.COOKIE_NAME, elsewhere)
+    assert tc.get("/api/auth/me").status_code == 401             # the other one is out
+    tc.cookies.clear()
+    assert tc.post("/api/auth/login", json=login).status_code == 401
+    assert tc.post("/api/auth/login", json={**login, "password": "a brand new password"}).status_code == 200
+    assert here != elsewhere
+    tc.cookies.clear()
+
+
 def test_failures_look_the_same_and_are_throttled(tc):
     _owner_signed_in(tc)
     tc.cookies.clear()

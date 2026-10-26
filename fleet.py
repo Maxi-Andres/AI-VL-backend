@@ -324,28 +324,29 @@ async def delete_robot(robot_id: str, conn: HTTPConnection):
 # Only what a team lead reads as news; sign-in noise and per-minute driving rows stay in the
 # audit log, out of the feed.
 FEED_ACTIONS = (
-    "auth.setup", "auth.password_reset", "team.invite", "team.invitation_accepted",
+    "auth.setup", "auth.password_reset", "auth.password_changed", "auth.profile_changed", "team.invite", "team.invitation_accepted",
     "team.member_changed", "fleet.site_created", "fleet.site_changed", "fleet.site_deleted",
     "fleet.plan_uploaded", "fleet.robot_added", "fleet.robot_changed", "fleet.robot_removed",
 )
 
 
 @router.get("/api/activity")
-async def activity(conn: HTTPConnection, limit: int = 12):
-    """The latest notable changes in the company, newest first, with who made them. Admins
-    only: the audit log names people and addresses."""
+async def activity(conn: HTTPConnection, limit: int = 12, offset: int = 0):
+    """The notable changes in the company, newest first, with who made them — a page of
+    `limit` from `offset` (Fleet shows the first few, Settings → Activity pages through all).
+    Admins only: the audit log names people and addresses."""
     me = _principal(conn)
-    limit = max(1, min(limit, 50))
+    limit, offset = max(1, min(limit, 100)), max(0, offset)
     async with db.SessionLocal() as s:
         rows = (await s.execute(
             select(db.AuditEvent, db.User.name)
             .outerjoin(db.User, db.User.id == db.AuditEvent.actor_user_id)
             .where(db.AuditEvent.org_id == me.org_id, db.AuditEvent.action.in_(FEED_ACTIONS))
             .order_by(db.AuditEvent.at.desc(), db.AuditEvent.id.desc())
-            .limit(limit)
+            .limit(limit).offset(offset)
         )).all()
     return [
-        {"at": ev.at.isoformat(), "action": ev.action, "target": ev.target,
+        {"id": ev.id, "at": ev.at.isoformat(), "action": ev.action, "target": ev.target,
          "actor": name or "", "detail": ev.detail or {}}
         for ev, name in rows
     ]

@@ -103,3 +103,6 @@ def test_the_activity_feed(owner):
     assert feed[0]["action"] == "fleet.site_created" and feed[0]["target"] == "Feed Site"
     assert feed[0]["actor"] == "Ana Owner"
     assert all(e["action"] != "auth.login" for e in feed)          # sign-ins stay out of it
+    first, second = (owner.get("/api/activity", params={"limit": 1, "offset": o}).json() for o in (0, 1))
+    assert len(first) == len(second) == 1 and first[0]["id"] == feed[0]["id"] != second[0]["id"]
+    assert second[0]["id"] == feed[1]["id"]                          # pages follow on

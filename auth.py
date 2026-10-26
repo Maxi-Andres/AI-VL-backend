@@ -81,6 +81,8 @@ POLICY: dict[tuple[str, str], str] = {
     ("GET", "/{full_path}"): PUBLIC,  # the SPA catch-all (path_format drops the ":path")
     ("POST", "/api/auth/logout"): AUTHENTICATED,
     ("GET", "/api/auth/me"): AUTHENTICATED,
+    ("PATCH", "/api/auth/me"): AUTHENTICATED,          # your own name (Settings → Profile)
+    ("POST", "/api/auth/password"): AUTHENTICATED,     # your own password, knowing the current
     # Joining through an invitation: the token in the body is the credential (team.py).
     ("POST", "/api/invitations/lookup"): PUBLIC,
     ("POST", "/api/invitations/accept"): PUBLIC,
@@ -512,6 +514,15 @@ class LoginRequest(BaseModel):
     remember: bool = False
 
 
+class ProfileUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
+class PasswordChange(BaseModel):
+    current_password: str = Field(max_length=PASSWORD_MAX)
+    new_password: str = Field(max_length=PASSWORD_MAX)
+
+
 class SetupRequest(BaseModel):
     setup_code: str = Field(max_length=32)
     org_name: str = Field(min_length=1, max_length=120)
@@ -656,3 +667,67 @@ async def me(conn: HTTPConnection):
     if principal.kind != "user":
         raise HTTPException(403, "Not a person")
     return _me(principal, await _org_name(principal.org_id))
+
+
+def _person(conn: HTTPConnection) -> Principal:
+    principal: Principal = conn.scope["principal"]
+    if principal.kind != "user":
+        raise HTTPException(403, "Not a person")
+    return principal
+
+
+def _forget_cached(user_id: str) -> None:
+    """Drop this person's validated sessions from the cache, so the next request reads the
+    database again (a new name shows everywhere at once). Their sockets stay open."""
+    for h, p in list(_principals.items()):
+        if p.user_id == user_id:
+            _principals.pop(h, None)
+
+
+@router.patch("/me")
+async def update_me(body: ProfileUpdate, conn: HTTPConnection):
+    principal = _person(conn)
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(422, "Your name cannot be empty.")
+    async with db.SessionLocal() as s:
+        await s.execute(update(db.User).where(db.User.id == principal.user_id).values(name=name))
+        await s.commit()
+    _forget_cached(principal.user_id)
+    await audit(conn, "auth.profile_changed", principal, target=name)
+    principal.name = name
+    return _me(principal, await _org_name(principal.org_id))
+
+
+@router.post("/password")
+async def change_password(body: PasswordChange, conn: HTTPConnection):
+    """Change your own password. Proving the current one is what stops a borrowed, unlocked
+    browser from taking the account over; every OTHER session of yours is signed out."""
+    principal = _person(conn)
+    ip, key = client_ip(conn), f"password:{principal.user_id}"
+    if wait := _throttled(ip, key):
+        raise HTTPException(429, "Too many attempts. Try again in a few minutes.",
+                            headers={"Retry-After": str(int(wait))})
+    async with db.SessionLocal() as s:
+        user = await s.get(db.User, principal.user_id)
+    if user is None or not await verify_password(user.password_hash, body.current_password):
+        _record_fail(ip, key)
+        raise HTTPException(403, "Your current password is not right.")
+    check_password_policy(body.new_password, user.email)
+    new_hash = await hash_password(body.new_password)
+    now = db.utcnow()
+    async with db.SessionLocal() as s:
+        await s.execute(update(db.User).where(db.User.id == user.id).values(password_hash=new_hash))
+        others = (await s.execute(
+            select(db.AuthSession.id).where(db.AuthSession.user_id == user.id,
+                                            db.AuthSession.id != principal.credential_id,
+                                            db.AuthSession.revoked_at.is_(None))
+        )).scalars().all()
+        await s.execute(update(db.AuthSession).where(db.AuthSession.id.in_(others))
+                        .values(revoked_at=now))
+        await s.commit()
+    for sid in others:
+        await revoke_credential(sid)
+    _fails.pop((ip, key), None)
+    await audit(conn, "auth.password_changed", principal, detail={"signed_out": len(others)})
+    return {"ok": True, "signed_out": len(others)}
