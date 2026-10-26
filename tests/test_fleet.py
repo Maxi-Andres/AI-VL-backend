@@ -2,7 +2,8 @@
 
 Proven here: an admin builds the fleet and anyone signed in can see it; a viewer cannot
 change it; one robot per stack slot; deleting a site keeps its robots, unassigned; the floor
-plan is accepted by its bytes, not its claimed type, and is bounded.
+plan is accepted by its bytes, not its claimed type, and is bounded; the satellite layer exists
+only with a key.
 """
 from __future__ import annotations
 
@@ -58,6 +59,16 @@ def test_build_a_site_with_robots(owner):
     f = owner.get("/api/fleet").json()
     assert f["sites"] == [] and f["robots"][0]["site_id"] is None   # the robot stays
     assert owner.delete(f"/api/robots/{go2.json()['id']}").status_code == 200
+
+
+def test_satellite_only_with_a_key(owner, monkeypatch, tmp_path):
+    monkeypatch.delenv("ESRI_API_KEY", raising=False)
+    monkeypatch.setattr(fleet, "ESRI_KEY_PATH", tmp_path / "esri-api-key")
+    assert owner.get("/api/fleet").json()["satellite"] is None
+    (tmp_path / "esri-api-key").write_text("from-file\n")         # no restart needed
+    assert owner.get("/api/fleet").json()["satellite"].endswith("?token=from-file")
+    monkeypatch.setenv("ESRI_API_KEY", "AAPK a/b")                  # the env wins, escaped
+    assert owner.get("/api/fleet").json()["satellite"].endswith("?token=AAPK%20a%2Fb")
 
 
 def test_the_floor_plan(owner, monkeypatch):

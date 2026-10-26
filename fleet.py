@@ -11,14 +11,19 @@ slot is only the wire address.
 
 A site may carry a floor plan, an image uploaded as the raw request body (no multipart
 dependency), checked by its first bytes, at most PLAN_MAX bytes, stored in
-PILOT_DATA_DIR/site-plans/<site id>. Satellite imagery is deliberately not here: free tile
-servers are not licensed for a product, and indoor sites need the plan anyway.
+PILOT_DATA_DIR/site-plans/<site id>.
+
+Satellite imagery is Esri World Imagery through ArcGIS Location Platform: its free tier (2M
+basemap tiles a month) allows commercial apps, but only with an API key — the keyless Esri
+endpoints are not licensed for a product. No key, no satellite layer; the street map stays.
 """
 from __future__ import annotations
 
 import asyncio
+import os
 import zoneinfo
 from functools import lru_cache
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.requests import HTTPConnection
@@ -35,7 +40,24 @@ PLAN_MAX = 10 * 1024 * 1024  # a large PNG plan is a few MB; bound it (standard 
 # First bytes -> media type. Anything else is refused, whatever its Content-Type says.
 _PLAN_MAGIC = ((b"\x89PNG\r\n\x1a\n", "image/png"), (b"\xff\xd8\xff", "image/jpeg"))
 
+# The key comes from ESRI_API_KEY or the file PILOT_DATA_DIR/esri-api-key, read on each call so
+# an admin can add it without a restart. It reaches every viewer's browser inside the tile URL —
+# that is how a client-side basemap key works — so it must be a key scoped to basemaps only.
+SATELLITE_TILES = ("https://ibasemaps-api.arcgis.com/arcgis/rest/services/World_Imagery/"
+                   "MapServer/tile/{z}/{y}/{x}?token=")
+ESRI_KEY_PATH = db.DATA_DIR / "esri-api-key"
+
 router = APIRouter()
+
+
+def _satellite_tiles() -> str | None:
+    key = os.environ.get("ESRI_API_KEY", "").strip()
+    if not key:
+        try:
+            key = ESRI_KEY_PATH.read_text().strip()
+        except OSError:
+            key = ""
+    return f"{SATELLITE_TILES}{quote(key, safe='')}" if key else None
 
 
 @lru_cache(maxsize=1024)
@@ -67,7 +89,8 @@ def _robot_json(robot: db.Robot) -> dict:
 
 @router.get("/api/fleet")
 async def fleet(conn: HTTPConnection):
-    """Everything the Fleet page draws, in one call: sites, robots, and the free slots."""
+    """Everything the Fleet page draws, in one call: sites, robots, the free slots, and the
+    satellite layer when this server has a key for one."""
     me = _principal(conn)
     async with db.SessionLocal() as s:
         sites = (await s.execute(select(db.Site).where(db.Site.org_id == me.org_id)
@@ -79,6 +102,7 @@ async def fleet(conn: HTTPConnection):
         "sites": [_site_json(x) for x in sites],
         "robots": [_robot_json(r) for r in robots],
         "slots": [{"slot": k, "model": v, "free": k not in used} for k, v in ROBOT_SLOTS.items()],
+        "satellite": _satellite_tiles(),
     }
 
 
