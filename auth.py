@@ -81,6 +81,18 @@ POLICY: dict[tuple[str, str], str] = {
     ("GET", "/{full_path}"): PUBLIC,  # the SPA catch-all (path_format drops the ":path")
     ("POST", "/api/auth/logout"): AUTHENTICATED,
     ("GET", "/api/auth/me"): AUTHENTICATED,
+    # Joining through an invitation: the token in the body is the credential (team.py).
+    ("POST", "/api/invitations/lookup"): PUBLIC,
+    ("POST", "/api/invitations/accept"): PUBLIC,
+    # manage_users — the team: who is in it, with what role (team.py).
+    ("GET", "/api/team"): "manage_users",
+    ("POST", "/api/team/invitations"): "manage_users",
+    ("DELETE", "/api/team/invitations/{invitation_id}"): "manage_users",
+    ("PATCH", "/api/team/members/{user_id}"): "manage_users",
+    ("POST", "/api/team/members/{user_id}/password-reset"): "manage_users",
+    # Setting a new password through a reset link: the token is the credential (team.py).
+    ("POST", "/api/password-resets/lookup"): PUBLIC,
+    ("POST", "/api/password-resets/complete"): PUBLIC,
     # view — look, never touch.
     ("GET", "/api/health"): "view",
     ("GET", "/api/options"): "view",
@@ -123,10 +135,14 @@ POLICY: dict[tuple[str, str], str] = {
     ("WS", "/ws/robot-h264"): "ingest",
 }
 
-# Audited on every call: rare, and each one changes something for everybody. Driving
-# (/api/execute, several times a second) is not audited per call — that needs its own,
-# aggregated design, not a row per stick sample.
+# Audited on every call: rare, and each one changes something for everybody.
 AUDITED = frozenset({"configure"})
+# Driving sends /api/execute several times a second, so "operate" is audited at most once per
+# OPERATE_AUDIT_EVERY per session and route: the log answers "who was driving, and when"
+# without a row per stick sample. Written in the background — the control path never waits.
+OPERATE_AUDIT_EVERY = 60.0
+_operate_audited: dict[tuple[str, str], float] = {}
+_background: set[asyncio.Task] = set()
 
 # --------------------------------------------------------------------------- #
 # Sessions
@@ -322,6 +338,13 @@ async def authorize(conn: HTTPConnection) -> Principal | None:
     conn.scope["principal"] = principal
     if need in AUDITED:
         await audit(conn, f"{need}:{method} {path}", principal)
+    elif need == "operate":
+        key, now = (principal.credential_id, f"{method} {path}"), time.monotonic()
+        if now - _operate_audited.get(key, float("-inf")) >= OPERATE_AUDIT_EVERY:
+            _operate_audited[key] = now
+            task = asyncio.create_task(audit(conn, f"operate:{method} {path}", principal))
+            _background.add(task)
+            task.add_done_callback(_background.discard)
     return principal
 
 
@@ -335,6 +358,23 @@ async def revoke_credential(credential_id: str, *, close_code: int = 4401) -> No
             await ws.close(code=close_code, reason="Signed out")
         except Exception as e:
             logger.info("auth: closing a revoked socket failed: %s", e)
+
+
+async def revoke_user_sessions(user_id: str) -> int:
+    """Sign a person out everywhere, now: their sessions in the database, the validated copies
+    in this process, and their open WebSockets. Used when their role or access changes."""
+    now = db.utcnow()
+    async with db.SessionLocal() as s:
+        ids = (await s.execute(
+            select(db.AuthSession.id).where(db.AuthSession.user_id == user_id,
+                                            db.AuthSession.revoked_at.is_(None))
+        )).scalars().all()
+        await s.execute(update(db.AuthSession)
+                        .where(db.AuthSession.id.in_(ids)).values(revoked_at=now))
+        await s.commit()
+    for sid in ids:
+        await revoke_credential(sid)
+    return len(ids)
 
 
 async def audit(conn: HTTPConnection | None, action: str, principal: Principal | None = None,

@@ -46,6 +46,7 @@ from pydantic import BaseModel
 from websockets.asyncio.client import connect as ws_connect
 
 import auth
+import team
 
 IACORE_URL = os.environ.get("IACORE_URL", "http://localhost:8001").rstrip("/")
 # The robot executor (ROS2 skill executor) — a separate service, usually the
@@ -100,6 +101,7 @@ async def lifespan(app):
 app = FastAPI(title="backend — gateway", lifespan=lifespan,
               dependencies=[Depends(auth.authorize)])
 app.include_router(auth.router)
+app.include_router(team.router)
 # Credentials (the session cookie) only for origins named explicitly — never with "*". The
 # deploy is same-origin and needs no CORS at all; this is for the vite dev server on :5173,
 # which calls :8000 directly: run the gateway with CORS_ORIGINS=http://localhost:5173.
@@ -959,6 +961,8 @@ async def ws_detect(ws: WebSocket):
 # --------------------------------------------------------------------------- #
 @app.websocket("/ws/view")
 async def ws_view(ws: WebSocket):
+    principal = ws.scope.get("principal")
+    may_tune = principal is not None and "analyze" in principal.permissions
     await ws.accept()
     conn = Conn(ws, is_viewer=True)
     hub.add(conn)
@@ -986,7 +990,10 @@ async def ws_view(ws: WebSocket):
             # detection off for everyone every time it reconnected.
             if isinstance(upd.get("boxes"), bool):
                 conn.wants_boxes = upd["boxes"]
-            hub.apply_config(upd, origin=conn)
+            # The shared config (model, threshold, classes…) changes detection for EVERY
+            # viewer and costs GPU: it needs "analyze". A viewer only picks their own boxes.
+            if may_tune:
+                hub.apply_config(upd, origin=conn)
     except WebSocketDisconnect:
         pass
     finally:

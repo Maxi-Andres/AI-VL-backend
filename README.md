@@ -62,6 +62,13 @@ viewer (watch) < operator (+ ask the AI, drive, act) < admin (+ robot/video sett
 - **Schema:** Alembic migrations in `migrations/`, applied on startup. New table or column:
   `alembic revision -m "..."` from this directory, then edit the generated file.
 - **From the shell** (`pilot_admin.py`): list users, reset a password, create/revoke device keys.
+- **Someone forgot their password:** an admin or owner opens Team → *Reset password* and hands
+  them the one-time link (24 h). Later, with SMTP, the same link goes out by email.
+- **The only owner forgot theirs (break-glass):** on the server, as the account that runs the
+  gateway, from this directory:
+  `.venv/bin/python pilot_admin.py set-password <email>`. It needs a shell on the server, which
+  can already read the database, so it opens nothing new; it signs the person out everywhere
+  and leaves an `auth.password_reset` audit row. Team warns while there is only one owner.
 - **Dev with the vite server** (`:5173` calls `:8000` directly): start the gateway with
   `CORS_ORIGINS=http://localhost:5173` so the browser may send the session cookie.
 

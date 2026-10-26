@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """pilot_admin.py — account administration from the server's shell.
 
-For what the web app cannot do yet, and for getting back in when nobody can sign in. It
+For what the web app cannot do yet, and for getting back in when nobody can sign in — e.g.
+the only owner forgot their password: `set-password` is the way back. It needs a shell on the
+server as the account that runs the gateway, which can already read the database itself, so
+it opens nothing new; it signs the person out everywhere and leaves an audit row. It
 talks to the same database as the gateway (PILOT_DATA_DIR / DATABASE_URL), so run it on the
 server, as the user that runs the gateway, from this directory:
 
     .venv/bin/python pilot_admin.py users
     .venv/bin/python pilot_admin.py set-password ana@acme.example
     .venv/bin/python pilot_admin.py device-key create "camera bridge" --save
+    .venv/bin/python pilot_admin.py device-key create "latency probe" --role viewer
     .venv/bin/python pilot_admin.py device-key list
     .venv/bin/python pilot_admin.py device-key revoke pk_Ab12Cd
 
@@ -71,6 +75,10 @@ def set_password(args) -> int:
         s.execute(update(db.AuthSession).where(db.AuthSession.user_id == user.id,
                                                db.AuthSession.revoked_at.is_(None))
                   .values(revoked_at=db.utcnow()))
+        # Recorded like any other change, so a reset done on the server is visible in the app.
+        member = s.execute(select(db.Membership).where(db.Membership.user_id == user.id)).scalar()
+        s.add(db.AuditEvent(org_id=member.org_id if member else None, action="auth.password_reset",
+                            target=email, detail={"via": "pilot_admin.py on the server"}))
         s.commit()
     print(f"Password changed for {email}; their open sessions were signed out.")
     return 0
@@ -84,7 +92,7 @@ def key_create(args) -> int:
                   file=sys.stderr)
             return 1
         key = auth.new_api_key()
-        s.add(db.ApiKey(org_id=org.id, name=args.name, role="device",
+        s.add(db.ApiKey(org_id=org.id, name=args.name, role=args.role,
                         key_hash=auth.token_hash(key), prefix=key[:9]))
         s.commit()
     if args.save:
@@ -129,6 +137,9 @@ def main() -> int:
     ksub = keys.add_subparsers(required=True)
     kc = ksub.add_parser("create", help="create a key; prints it once")
     kc.add_argument("name")
+    kc.add_argument("--role", choices=("device", "viewer"), default="device",
+                    help="device = push video in (the camera bridge); viewer = read-only, e.g. "
+                         "a measurement script that watches /ws/view")
     kc.add_argument("--save", action="store_true",
                     help=f"write it to {auth.DEVICE_KEY_PATH} (the bridge reads it there) "
                          "instead of printing it")
