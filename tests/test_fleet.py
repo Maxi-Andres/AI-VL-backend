@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 import app as gateway
 import auth
 import fleet
+import robot_watch
 
 pytestmark = pytest.mark.real_auth
 
@@ -106,3 +107,36 @@ def test_the_activity_feed(owner):
     first, second = (owner.get("/api/activity", params={"limit": 1, "offset": o}).json() for o in (0, 1))
     assert len(first) == len(second) == 1 and first[0]["id"] == feed[0]["id"] != second[0]["id"]
     assert second[0]["id"] == feed[1]["id"]                          # pages follow on
+
+
+def test_the_last_known_state_survives_the_robot(owner, monkeypatch):
+    rid = owner.post("/api/robots", json={"name": "Watch Dog", "slot": "go2"}).json()["id"]
+    answers = iter([12.5, 13.0, None, 9.0, None, None])            # ms, or no reply
+    async def fake_ping(ip, *_):
+        return next(answers)
+    monkeypatch.setattr(robot_watch, "ping_rtt", fake_ping)
+    robot_watch._streak.clear()
+    seen = {"go2": {"mode": "relay", "ping_ip": "10.0.0.2",
+                    "relay": {"battery": {"percent": 78.4, "charging": False}}}}
+    status = lambda: next(r for r in owner.get("/api/fleet").json()["robots"] if r["id"] == rid)["status"]  # noqa: E731
+
+    assert status()["online"] is None                                # never measured
+    owner.portal.call(robot_watch.record, seen)
+    st = status()
+    assert st["online"] is True and st["latency_ms"] == 12.5 and st["link"] == "relay"
+    assert st["battery_pct"] == 78.4 and st["battery_charging"] is False
+    since = st["since"]
+
+    owner.portal.call(robot_watch.record, {"go2": {**seen["go2"], "relay": {"battery": {"percent": 70, "stale": True}}}})
+    assert status()["battery_pct"] == 78.4                           # a stale reading is not kept
+    owner.portal.call(robot_watch.record, seen)                      # one lost ping...
+    assert status()["online"] is True and status()["since"] == since  # ...does not flip it
+    owner.portal.call(robot_watch.record, seen)                      # answers again
+    owner.portal.call(robot_watch.record, seen)
+    owner.portal.call(robot_watch.record, seen)                      # two in a row: offline
+    st = status()
+    assert st["online"] is False and st["since"] != since and st["battery_pct"] == 78.4
+    assert st["last_seen_at"] is not None                            # when it was last there
+    feed = owner.get("/api/activity").json()
+    assert feed[0]["action"] == "robot.offline" and feed[0]["target"] == "Watch Dog"
+    owner.delete(f"/api/robots/{rid}")

@@ -81,10 +81,20 @@ def _site_json(site: db.Site) -> dict:
             "has_plan": bool(site.plan_type)}
 
 
+def _iso(t) -> str | None:
+    return t.isoformat() if t else None
+
+
 def _robot_json(robot: db.Robot) -> dict:
     return {"id": robot.id, "name": robot.name, "slot": robot.slot,
             "model": ROBOT_SLOTS.get(robot.slot, robot.slot), "serial": robot.serial,
-            "site_id": robot.site_id}
+            "site_id": robot.site_id,
+            # The last known state (robot_watch.py), for when the robot is not answering now.
+            "status": {"online": robot.online, "since": _iso(robot.status_since),
+                       "last_seen_at": _iso(robot.last_seen_at), "latency_ms": robot.latency_ms,
+                       "link": robot.link, "battery_pct": robot.battery_pct,
+                       "battery_charging": robot.battery_charging,
+                       "battery_at": _iso(robot.battery_at)}}
 
 
 @router.get("/api/fleet")
@@ -327,6 +337,7 @@ FEED_ACTIONS = (
     "auth.setup", "auth.password_reset", "auth.password_changed", "auth.profile_changed", "team.invite", "team.invitation_accepted",
     "team.member_changed", "fleet.site_created", "fleet.site_changed", "fleet.site_deleted",
     "fleet.plan_uploaded", "fleet.robot_added", "fleet.robot_changed", "fleet.robot_removed",
+    "robot.online", "robot.offline",
 )
 
 

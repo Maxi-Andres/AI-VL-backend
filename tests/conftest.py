@@ -30,6 +30,8 @@ sys.path.insert(0, str(BACKEND))
 # anything imports db, so no test ever reads or writes the real ~/.pilot.
 os.environ["PILOT_DATA_DIR"] = tempfile.mkdtemp(prefix="pilot-test-")
 os.environ.pop("DATABASE_URL", None)
+# No background robot watcher: the tests drive robot_watch.record() themselves.
+os.environ["ROBOT_WATCH_SECONDS"] = "0"
 
 
 def pytest_configure(config):

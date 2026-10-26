@@ -47,6 +47,7 @@ from websockets.asyncio.client import connect as ws_connect
 
 import auth
 import fleet
+import robot_watch
 import team
 
 IACORE_URL = os.environ.get("IACORE_URL", "http://localhost:8001").rstrip("/")
@@ -91,9 +92,11 @@ async def lifespan(app):
         base_url=IACORE_URL,
         timeout=httpx.Timeout(connect=5.0, read=320.0, write=30.0, pool=5.0),
     )
+    watch = robot_watch.start(EXECUTOR_URL)
     try:
         yield
     finally:
+        await robot_watch.stop(watch)
         await client.aclose()
 
 
@@ -360,7 +363,7 @@ _PING_CACHE: dict[str, tuple[float, bool]] = {}
 _PING_TTL = 4.0
 
 
-async def _ping(ip: str, timeout: float = 1.2) -> bool:  # noqa: ASYNC109  # bounded with asyncio.wait_for below, which is the documented pattern
+async def _ping(ip: str, timeout: float = 1.2) -> bool:  # noqa: ASYNC109  # passed to robot_watch.ping_rtt, which bounds it with asyncio.wait_for
     """True if the host answers ICMP. One packet, short deadline: this drives a UI dot."""
     if not ip:
         return False
@@ -368,18 +371,7 @@ async def _ping(ip: str, timeout: float = 1.2) -> bool:  # noqa: ASYNC109  # bou
     hit = _PING_CACHE.get(ip)
     if hit and now - hit[0] < _PING_TTL:
         return hit[1]
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "ping", "-c", "1", "-W", "1", ip,
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-        try:
-            rc = await asyncio.wait_for(proc.wait(), timeout=timeout)
-        except TimeoutError:
-            proc.kill()
-            rc = 1
-        ok = rc == 0
-    except Exception:
-        ok = False
+    ok = await robot_watch.ping_rtt(ip, timeout) is not None
     _PING_CACHE[ip] = (now, ok)
     return ok
 

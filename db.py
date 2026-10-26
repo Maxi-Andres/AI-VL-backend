@@ -233,6 +233,17 @@ class Robot(Base):
     slot: Mapped[str] = mapped_column(String(16))
     serial: Mapped[str] = mapped_column(String(80), default="")
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    # Last known state, written by robot_watch.py every few seconds whether or not anyone has
+    # the app open — so a card can say "offline · 2 h" and still show the last battery.
+    # None everywhere means never measured (no ping address configured, or not yet).
+    online: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    status_since: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    link: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    battery_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    battery_charging: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    battery_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
 
 
 class AuditEvent(Base):
