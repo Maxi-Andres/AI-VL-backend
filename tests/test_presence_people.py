@@ -38,8 +38,8 @@ def tc(monkeypatch):
     async def no_sidecar(_url: str):
         return None
 
-    async def no_iacore() -> bool:
-        return False
+    async def no_iacore():
+        return None
 
     monkeypatch.setattr(gateway, "_probe_json", no_sidecar)
     monkeypatch.setattr(gateway, "_probe_iacore", no_iacore)

@@ -1521,19 +1521,30 @@ async def _probe_json(url: str) -> "dict | None":
         return None
 
 
-async def _probe_iacore() -> bool:
+# iacore's /status probes the VLM server and runs nvidia-smi (up to ~2.5 s when one of them
+# hangs), so it gets more read time than a sidecar's status.
+_IACORE_STATUS_TIMEOUT = httpx.Timeout(connect=1.0, read=3.5, write=2.0, pool=1.0)
+
+
+async def _probe_iacore() -> "dict | None":
+    """None: iacore does not answer. Otherwise its /status — whether the VLM server answers and
+    how full the GPU is — or {} from an older iacore that only has /health."""
     try:
+        r = await client.get("/status", timeout=_IACORE_STATUS_TIMEOUT)
+        if r.status_code < 400:
+            d = r.json()
+            return d if isinstance(d, dict) else {}
         r = await client.get("/health", timeout=_PROBE_TIMEOUT)
-        return r.status_code < 500
+        return {} if r.status_code < 500 else None
     except Exception:
-        return False
+        return None
 
 
 @app.get("/api/presence")
 async def presence():
     """Who is connected right now, for the header pills: the robot-camera producer
     (and which robot it is streaming), the browsers on the hub and the people behind
-    them, and whether the executor / iacore answer.
+    them, whether the executor / iacore / the VLM server answer, and how full the GPU is.
 
     Cached for PRESENCE_TTL and serialized on a lock so N polling browsers cost ONE
     probe round — the bridge and the executor are single-threaded HTTP servers that
@@ -1545,7 +1556,7 @@ async def presence():
         if cached and now - ts < PRESENCE_TTL:
             return cached
 
-        bridge, executor, iacore_ok = await asyncio.gather(
+        bridge, executor, iacore = await asyncio.gather(
             _probe_json(f"{CAMERA_CONTROL_URL}/status"),
             _probe_json(f"{EXECUTOR_URL}/health"),
             _probe_iacore(),
@@ -1569,7 +1580,14 @@ async def presence():
                 "safe_mode": e.get("safe_mode"),
                 "dry_run": e.get("dry_run"),
             },
-            "iacore": {"online": iacore_ok},
+            "iacore": {
+                "online": iacore is not None,
+                # The VLM server (llama-server or Ollama) is its own process: it can be down
+                # while iacore answers. None when this iacore cannot tell.
+                "vlm": (iacore or {}).get("vlm"),
+                # The whole card, every process on it: {used_mb, total_mb, name} or None.
+                "gpu": (iacore or {}).get("gpu"),
+            },
         }
         _presence_cache = (now, data)
         return data
