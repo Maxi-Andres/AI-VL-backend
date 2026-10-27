@@ -78,6 +78,10 @@ POLICY: dict[tuple[str, str], str] = {
     ("GET", "/api/auth/state"): PUBLIC,
     ("POST", "/api/auth/setup"): PUBLIC,
     ("POST", "/api/auth/login"): PUBLIC,
+    # Single sign-on through the company's identity provider (sso.py): the provider's signed
+    # answer is the credential, checked there.
+    ("GET", "/api/auth/sso/start"): PUBLIC,
+    ("GET", "/api/auth/sso/callback"): PUBLIC,
     ("GET", "/{full_path}"): PUBLIC,  # the SPA catch-all (path_format drops the ":path")
     ("POST", "/api/auth/logout"): AUTHENTICATED,
     ("GET", "/api/auth/me"): AUTHENTICATED,
@@ -151,6 +155,9 @@ POLICY: dict[tuple[str, str], str] = {
     # manage_org — the company's own data: its backups (backup.py).
     ("GET", "/api/backups"): "manage_org",
     ("POST", "/api/backups"): "manage_org",
+    # ...and how its people sign in: the identity provider for single sign-on (sso.py).
+    ("GET", "/api/org/sso"): "manage_org",
+    ("PUT", "/api/org/sso"): "manage_org",
     # The bell: each person's own notifications (what they may see is decided in fleet.py).
     ("GET", "/api/notifications"): AUTHENTICATED,
     ("POST", "/api/notifications/seen"): AUTHENTICATED,
@@ -609,12 +616,15 @@ async def _start_session(conn: HTTPConnection, response: Response, user: db.User
 
 @router.get("/state")
 async def auth_state():
-    """What the sign-in page needs before anyone is signed in."""
+    """What the sign-in page needs before anyone is signed in: whether to run the first-run
+    setup, the company's name, and the single sign-on button to show (null: none)."""
+    import sso  # here, not at the top: sso imports this module
     if await _account_count() == 0:
-        return {"setup_required": True, "org_name": None}
+        return {"setup_required": True, "org_name": None, "sso": None}
     async with db.SessionLocal() as s:
         org = (await s.execute(select(db.Organization).limit(1))).scalar()
-    return {"setup_required": False, "org_name": org.name if org else None}
+    return {"setup_required": False, "org_name": org.name if org else None,
+            "sso": await sso.sign_in_option()}
 
 
 @router.post("/setup")

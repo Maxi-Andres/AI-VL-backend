@@ -132,7 +132,7 @@ def test_first_run_setup_needs_the_code_and_works_once(tc):
     assert not auth.SETUP_CODE_PATH.exists()                     # spent
     assert auth.DEVICE_KEY_PATH.stat().st_mode & 0o777 == 0o600  # the bridge's key, private
     assert tc.get("/api/auth/state").json() == {"setup_required": False,
-                                                "org_name": "Acme Logistics"}
+                                                "org_name": "Acme Logistics", "sso": None}
     again = tc.post("/api/auth/setup", json={**OWNER, "setup_code": code})
     assert again.status_code == 409
 

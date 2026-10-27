@@ -15,7 +15,9 @@ frontend (browser UI)  ──HTTP/WS──▶  THIS (backend)  ──HTTP──�
 It holds **NO** detection logic and **NO** model deps (no ultralytics/torch/pillow)
 — just FastAPI + `httpx`. The relaying lives in `app.py`; accounts and access live in
 `auth.py` (who may call what — `POLICY`, default deny), `team.py` (invitations, roles,
-password resets), `fleet.py` (sites, floor plans, robots), `robot_watch.py` (a background
+password resets), `sso.py` (single sign-on through the company's identity provider — OIDC:
+Microsoft Entra, Google or any other; only invited people get in, the password stays as the
+fallback), `fleet.py` (sites, floor plans, robots), `robot_watch.py` (a background
 loop that keeps each robot's last known state: online since, last seen, latency, battery),
 `chats.py` (the vision assistant's conversations, private to each person), `backup.py` (a
 dated copy of PILOT_DATA_DIR every day, the last few kept), `db.py` (SQLite via SQLAlchemy) and `migrations/` (Alembic, applied on startup). **Every new route needs a `POLICY` entry** or it

@@ -104,6 +104,15 @@ class Organization(Base):
     # reset links are built on it, not on whatever address the admin happened to open the page
     # with — "localhost" works only on that one computer.
     public_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Single sign-on through the company's identity provider (OIDC: Microsoft Entra, Google, or
+    # any other) — sso.py. Off until an owner turns it on in Settings; signing in with a password
+    # keeps working either way, as the way in when the provider is down. The secret is never sent
+    # back to a browser; it sits in this database (PILOT_DATA_DIR, 0700) and in its backups.
+    sso_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    sso_provider: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    sso_issuer: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    sso_client_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    sso_client_secret: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
 
 class User(Base):
@@ -122,6 +131,9 @@ class User(Base):
     # How Pilot looks and talks for this person — theme, voice, volume… — so it follows them to
     # any computer. A flat {name: value} of strings; the names allowed are auth.PREFERENCES.
     preferences: Mapped[dict] = mapped_column(JSON, default=dict)
+    # "<issuer>|<sub>" of the identity-provider account this person signs in with, linked the
+    # first time they do (sso.py). The address can change at the provider; this cannot.
+    sso_subject: Mapped[str | None] = mapped_column(String(255), unique=True, index=True, nullable=True)
 
 
 class Membership(Base):

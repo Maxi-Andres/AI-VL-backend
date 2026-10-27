@@ -12,6 +12,8 @@ sqlalchemy[asyncio]>=2.0.40
 aiosqlite>=0.21
 alembic>=1.16
 argon2-cffi>=23.1
+# Single sign-on (sso.py): checking the identity provider's signed id_token.
+pyjwt[crypto]>=2.8
 # The full IANA zone list, old aliases included: Ubuntu ships without them (tzdata-legacy),
 # and browsers still report names like America/Buenos_Aires (fleet.py, a site's time zone).
 tzdata>=2025.2

@@ -50,6 +50,7 @@ import backup
 import chats
 import fleet
 import robot_watch
+import sso
 import team
 
 IACORE_URL = os.environ.get("IACORE_URL", "http://localhost:8001").rstrip("/")
@@ -110,6 +111,7 @@ app = FastAPI(title="backend — gateway", lifespan=lifespan,
               dependencies=[Depends(auth.authorize)])
 app.include_router(auth.router)
 app.include_router(team.router)
+app.include_router(sso.router)
 app.include_router(fleet.router)
 app.include_router(chats.router)
 # Credentials (the session cookie) only for origins named explicitly — never with "*". The
