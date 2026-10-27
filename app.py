@@ -706,8 +706,10 @@ class Hub:
         self.conns: set[Conn] = set()
         # Shared session config. Any client (phone OR a monitor) can change it; the
         # change is pushed to every OTHER client so all UIs stay in sync. The
-        # producer reads model/conf/imgsz/classes for every frame; `max_fps` is a
-        # client-side capture cap that we only relay (never sent to /detect).
+        # producer reads model/conf/imgsz/classes for every frame. `max_fps` caps
+        # detections per second: a browser's own camera applies it to what it sends,
+        # and /ws/robot-cam applies it here, to how often it calls iacore (never sent
+        # to /detect itself).
         self.config = {
             "model": None,
             "conf": None,
@@ -1112,6 +1114,7 @@ async def ws_robot_cam(ws: WebSocket):
     await ws.accept()
     robot_cam.attached += 1
     detect_task: asyncio.Task | None = None
+    last_detect = float("-inf")
     try:
         while True:
             msg = await ws.receive()
@@ -1126,6 +1129,14 @@ async def ws_robot_cam(ws: WebSocket):
                 continue  # nobody asked: iacore is not called at all
             if detect_task is not None and not detect_task.done():
                 continue  # one in flight is the cap
+            # The panel's Max FPS: at most that many detections a second. Until it is set,
+            # the GPU's own pace (one in flight) is the only limit — it used to be the only
+            # one always, and the slider did nothing on the robot camera.
+            cap = hub.config.get("max_fps") or 0
+            now = time.monotonic()
+            if cap > 0 and now - last_detect < 1.0 / cap:
+                continue
+            last_detect = now
             detect_task = asyncio.create_task(_detect_and_fanout(data))
     except WebSocketDisconnect:
         pass

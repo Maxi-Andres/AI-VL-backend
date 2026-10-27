@@ -269,6 +269,24 @@ def test_second_frame_is_skipped_while_a_detection_is_in_flight(tc, iacore):
         iacore.release()
 
 
+def test_max_fps_caps_detections_on_the_robot_camera(tc, iacore):
+    """Catches: the panel's Max FPS doing nothing on the robot camera — the gateway called
+    iacore as fast as the GPU answered, whatever the cap said."""
+    from contextlib import ExitStack
+
+    with ExitStack() as stack:
+        open_viewer(stack, tc, boxes=True)
+        cam = stack.enter_context(tc.websocket_connect("/ws/robot-cam"))
+        until(gateway.hub.wants_boxes, "the live viewer to be asking for boxes")
+        gateway.hub.config["max_fps"] = 2
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 1.2:          # ~24 frames in 1.2 s at 20 fps
+            cam.send_bytes(b"FRAME")
+            time.sleep(0.05)
+        time.sleep(0.1)
+        assert 2 <= len(iacore.calls) <= 3, f"{len(iacore.calls)} detections in 1.2 s at 2 fps"
+
+
 # --------------------------------------------------------------------------- #
 # §3.3 — the trap: POST /api/detect must answer, and ONLY answer
 # --------------------------------------------------------------------------- #
