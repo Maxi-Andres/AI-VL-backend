@@ -16,6 +16,7 @@ invitation flow that creates them through the API is a later phase.
 from __future__ import annotations
 
 import hashlib
+import re
 import secrets
 import threading
 
@@ -102,6 +103,39 @@ def _routes(routes, prefix: str = ""):
             yield from _routes(inner.routes, prefix + r.include_context.prefix)
         else:
             yield prefix, r
+
+
+def test_nothing_is_served_outside_the_auth_check():
+    """Catches: a route that FastAPI or Starlette serves without the app's dependencies — so
+    auth.authorize never sees it and the policy table cannot close it. That is how /docs, /redoc
+    and /openapi.json (the whole API map) were public until 2026-10-27; a mount or a plain
+    Starlette Route would be the same hole."""
+    odd = [(prefix, type(r).__name__, getattr(r, "path", "")) for prefix, r in _routes(gateway.app.routes)
+           if not isinstance(r, (APIRoute, APIWebSocketRoute))]
+    assert not odd, f"served outside auth.authorize: {odd}"
+
+
+def test_without_a_session_nothing_but_signing_in_answers(tc):
+    """Every route and WebSocket the app serves, called with no cookie and no key: all refused
+    (401 / close 4401) except the PUBLIC ones — signing in, first-run setup, single sign-on, and
+    the invitation and reset links, whose token is the credential. Not a sample: the whole table,
+    so a new route is covered the day it is added."""
+    anon = TestClient(gateway.app)
+    checked = 0
+    for prefix, r in _routes(gateway.app.routes):
+        path = re.sub(r"\{[^}]+\}", "x", prefix + r.path_format)
+        if isinstance(r, APIWebSocketRoute):
+            if auth.POLICY[("WS", prefix + r.path_format)] != auth.PUBLIC:
+                assert _close_code(anon, path) == 4401, path
+                checked += 1
+            continue
+        for method in sorted(r.methods - {"HEAD"}):
+            if auth.POLICY[(method, prefix + r.path_format)] == auth.PUBLIC:
+                continue
+            status = anon.request(method, path, json={}).status_code
+            assert status == 401, f"{method} {path} answered {status} with no session"
+            checked += 1
+    assert checked >= 70         # the sweep really ran over the table (72 on 2026-10-27)
 
 
 def test_every_route_has_a_policy_and_every_policy_a_route():

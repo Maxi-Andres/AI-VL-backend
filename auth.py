@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import ipaddress
 import logging
 import os
 import re
@@ -236,8 +237,68 @@ def token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+# Behind a reverse proxy (the office nginx that publishes Pilot on the internet) every request
+# arrives FROM the proxy, and the person's address is in X-Forwarded-For. That header is believed
+# only from these addresses (TRUSTED_PROXIES, comma-separated IPs or networks); from anyone else
+# it is ignored, or a caller could write their own.
+TRUSTED_PROXIES = [ipaddress.ip_network(x.strip(), strict=False)
+                   for x in os.environ.get("TRUSTED_PROXIES", "").split(",") if x.strip()]
+_FORWARD_HEADERS = ("x-forwarded-for", "x-real-ip", "forwarded")
+# The company's own networks: private LAN ranges, loopback, link-local, and Tailscale's
+# carrier-grade NAT range. Listed rather than ipaddress' is_private, which also counts the
+# documentation ranges (203.0.113.0/24…) and other reserved space as "private".
+_LOCAL_NETS = [ipaddress.ip_network(n) for n in (
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "169.254.0.0/16",
+    "100.64.0.0/10", "::1/128", "fc00::/7", "fe80::/10")]
+
+
+def _trusted(ip: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(addr in net for net in TRUSTED_PROXIES)
+
+
 def client_ip(conn: HTTPConnection) -> str:
-    return conn.client.host if conn.client else ""
+    """The caller's address: the peer, or — when the peer is a trusted proxy — the first address
+    in X-Forwarded-For, from the right, that is not one of our proxies."""
+    peer = conn.client.host if conn.client else ""
+    if not _trusted(peer):
+        return peer
+    hops = [h.strip() for h in conn.headers.get("x-forwarded-for", "").split(",") if h.strip()]
+    return next((h for h in reversed(hops) if not _trusted(h)), peer)
+
+
+def is_local(conn: HTTPConnection) -> bool:
+    """Is this request from the company's own network (LAN, VPN, Tailscale) rather than the
+    internet? Fails closed: a request that came through a proxy we were not told to trust is
+    treated as from the internet — without TRUSTED_PROXIES, every request through the office
+    nginx would otherwise look like it came from the nginx's own LAN address."""
+    peer = conn.client.host if conn.client else ""
+    if not _trusted(peer) and any(conn.headers.get(h) for h in _FORWARD_HEADERS):
+        return False
+    try:
+        addr = ipaddress.ip_address(client_ip(conn))
+    except ValueError:
+        return False
+    return any(addr in net for net in _LOCAL_NETS)
+
+
+async def password_allowed(conn: HTTPConnection) -> bool:
+    """May a password be used (sign in, or set one through an invitation or a reset link) from
+    where this request comes from? Always from the company's network. From the internet only
+    while single sign-on is off, or when an owner allowed it: with it on, people outside sign in
+    with the provider — which has its own second factor — and the password is the way in from
+    the office when the provider is down."""
+    if is_local(conn):
+        return True
+    async with db.SessionLocal() as s:
+        org = (await s.execute(select(db.Organization).limit(1))).scalar()
+    return org is None or not org.sso_enabled or bool(org.sso_password_anywhere)
+
+
+PASSWORD_ONLY_INSIDE = "From outside the company network, sign in with your work account."  # noqa: S105
 
 
 async def hash_password(password: str) -> str:
@@ -668,6 +729,9 @@ async def setup(req: SetupRequest, conn: HTTPConnection, response: Response):
 async def login(req: LoginRequest, conn: HTTPConnection, response: Response):
     ip = client_ip(conn)
     email = req.email.strip().lower()
+    if not await password_allowed(conn):
+        await audit(conn, "auth.login_refused_outside", detail={"email": email[:254]})
+        raise HTTPException(403, PASSWORD_ONLY_INSIDE)
     if wait := _throttled(ip, email):
         raise HTTPException(429, "Too many attempts. Try again in a few minutes.",
                             headers={"Retry-After": str(int(wait))})

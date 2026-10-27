@@ -47,6 +47,7 @@ Check it can reach iacore: <http://localhost:8000/api/health>.
 | `PILOT_DATA_DIR`| `~/.pilot`               | accounts database, first-run setup code, the camera bridge's device key (0700) |
 | `DATABASE_URL`  | SQLite in `PILOT_DATA_DIR` | SQLAlchemy async URL, e.g. Postgres later       |
 | `COOKIE_SECURE` | (auto: on over HTTPS)    | force the session cookie's Secure flag behind a TLS proxy |
+| `TRUSTED_PROXIES` | (none)                 | the reverse proxy's address(es); only from them is `X-Forwarded-For` believed (see `../docs/PUBLIC_ACCESS.md`) |
 
 ## Accounts and access
 

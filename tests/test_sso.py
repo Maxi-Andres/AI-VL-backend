@@ -13,12 +13,16 @@ Proven here:
 - the password keeps working next to it (the way in when the provider is down), and an account
   made through single sign-on has no password to guess;
 - the settings never send the secret back, refuse a tenant that would let in every Microsoft
-  account, and are for owners only.
+  account, and are for owners only;
+- with it on, a password works from the company network but not from the internet — also through
+  a proxy we were not told to trust — unless an owner allows it; X-Forwarded-For is believed only
+  from TRUSTED_PROXIES.
 """
 from __future__ import annotations
 
 import base64
 import hashlib
+import ipaddress
 import json
 import time
 from urllib.parse import parse_qs, urlsplit
@@ -103,6 +107,10 @@ def owner(idp):
                                           "client_id": CLIENT, "client_secret": "s3cret"})
         assert r.status_code == 200, r.text
         yield tc
+        # Off again: with it on, the other suites' password sign-ins (from "testclient", not a
+        # company address) would be refused.
+        tc.put("/api/org/sso", json={"enabled": False, "provider": "oidc", "issuer": ISSUER,
+                                     "client_id": CLIENT})
 
 
 @pytest.fixture(autouse=True)
@@ -145,8 +153,8 @@ def test_an_invited_address_joins_with_the_invitations_role_and_stays_linked(own
     assert _sign_in(again, idp, sub="u-luis", email="luis.perez@acme.example").headers["location"] == "/"
     assert again.get("/api/auth/me").json()["user"]["email"] == "luis@acme.example"
     # Made without a password: there is none to guess.
-    bad = TestClient(gateway.app).post("/api/auth/login", json={"email": "luis@acme.example",
-                                                               "password": "!"})
+    bad = TestClient(gateway.app, client=("192.168.20.31", 50000)).post(
+        "/api/auth/login", json={"email": "luis@acme.example", "password": "!"})
     assert bad.status_code == 401
 
 
@@ -165,8 +173,8 @@ def test_an_existing_account_is_linked_and_its_password_still_works(owner, idp):
     assert _failed(_sign_in(TestClient(gateway.app), idp, sub="u-other", email=OWNER["email"])) \
         == "linked_elsewhere"
     # The password is the way in when the provider is down.
-    pw = TestClient(gateway.app).post("/api/auth/login", json={"email": OWNER["email"],
-                                                              "password": OWNER["password"]})
+    pw = TestClient(gateway.app, client=("192.168.20.31", 50000)).post(
+        "/api/auth/login", json={"email": OWNER["email"], "password": OWNER["password"]})
     assert pw.status_code == 200
 
 
@@ -236,3 +244,27 @@ def test_only_owners_see_the_settings(owner, idp):
     admin = TestClient(gateway.app)
     assert _sign_in(admin, idp, sub="u-adm", email="adm@acme.example").headers["location"] == "/"
     assert admin.get("/api/org/sso").status_code == 403
+
+
+def _password(peer: str, headers: dict | None = None) -> int:
+    with TestClient(gateway.app, client=(peer, 50000)) as tc:
+        return tc.post("/api/auth/login", headers=headers or {},
+                       json={"email": OWNER["email"], "password": OWNER["password"]}).status_code
+
+
+def test_with_sso_on_a_password_works_from_inside_only(owner, idp, monkeypatch):
+    assert _password("192.168.20.31") == 200                 # the office LAN
+    assert _password("100.101.102.103") == 200               # Tailscale
+    assert _password("200.45.10.3") == 403                   # the internet
+    # Through the office nginx, but nobody told us to trust it: not believed to be inside.
+    assert _password("192.168.20.1", {"X-Forwarded-For": "192.168.20.31"}) == 403
+    monkeypatch.setattr(auth, "TRUSTED_PROXIES", [ipaddress.ip_network("192.168.20.1/32")])
+    assert _password("192.168.20.1", {"X-Forwarded-For": "181.30.2.77"}) == 403
+    assert _password("192.168.20.1", {"X-Forwarded-For": "192.168.20.31"}) == 200
+    # A forged hop on the left does not help: the address nginx saw is the rightmost one.
+    assert _password("192.168.20.1", {"X-Forwarded-For": "192.168.20.31, 198.51.100.7"}) == 403
+    # An owner can allow it from anywhere.
+    allow = owner.put("/api/org/sso", json={"enabled": True, "provider": "oidc", "issuer": ISSUER,
+                                            "client_id": CLIENT, "password_anywhere": True})
+    assert allow.status_code == 200 and allow.json()["password_anywhere"] is True
+    assert _password("200.45.10.3") == 200

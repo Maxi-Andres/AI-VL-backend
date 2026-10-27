@@ -107,8 +107,12 @@ async def lifespan(app):
 
 # auth.authorize runs before EVERY route and WebSocket, including the ones added later:
 # a route without an auth.POLICY entry is refused (and tests/test_auth.py fails).
+# No /docs, /redoc or /openapi.json: FastAPI serves them outside the route dependencies, so
+# auth.authorize never saw them and the whole API map was public, signed in or not (found
+# 2026-10-27 while preparing to publish Pilot on the internet).
 app = FastAPI(title="backend — gateway", lifespan=lifespan,
-              dependencies=[Depends(auth.authorize)])
+              dependencies=[Depends(auth.authorize)],
+              docs_url=None, redoc_url=None, openapi_url=None)
 app.include_router(auth.router)
 app.include_router(team.router)
 app.include_router(sso.router)
@@ -117,6 +121,51 @@ app.include_router(chats.router)
 # Credentials (the session cookie) only for origins named explicitly — never with "*". The
 # deploy is same-origin and needs no CORS at all; this is for the vite dev server on :5173,
 # which calls :8000 directly: run the gateway with CORS_ORIGINS=http://localhost:5173.
+# Headers that tell the browser what this site may do, on every HTTP answer (not WebSockets):
+# - CSP: scripts only from this origin (an injected <script> does not run) plus WebAssembly
+#   (three's meshopt decoder for the 3D robot); images and calls also to https (map tiles, the
+#   address search, mediamtx's WebRTC on its own port); no one may frame Pilot (clickjacking).
+# - HSTS on https: once seen, the browser never tries plain http for this name again.
+# - nosniff, no referrer outside the site, and the camera/microphone/location for this origin only.
+_CSP = ("default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: blob: https:; media-src 'self' blob: data:; font-src 'self' data:; "
+        "connect-src 'self' https: wss:; worker-src 'self' blob:; object-src 'none'; "
+        "base-uri 'self'; form-action 'self'; frame-ancestors 'none'")
+_SECURITY_HEADERS = [
+    (b"content-security-policy", _CSP.encode()),
+    (b"x-content-type-options", b"nosniff"),
+    (b"x-frame-options", b"DENY"),
+    (b"referrer-policy", b"same-origin"),
+    (b"permissions-policy", b"camera=(self), microphone=(self), geolocation=(self)"),
+]
+
+
+class SecurityHeaders:
+    """Pure ASGI (no BaseHTTPMiddleware): it touches only the response's start, so the VLM's
+    streamed answers and the WebSockets pass through untouched."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        secure = scope.get("scheme") == "https" or auth.FORCE_SECURE_COOKIE
+
+        async def send_with_headers(message):
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                have = {k.lower() for k, _ in headers}
+                headers += [(k, v) for k, v in _SECURITY_HEADERS if k not in have]
+                if secure:
+                    headers.append((b"strict-transport-security", b"max-age=31536000"))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
+
+
+app.add_middleware(SecurityHeaders)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS or ["*"],

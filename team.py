@@ -355,6 +355,8 @@ async def lookup(req: TokenRequest, conn: HTTPConnection):
 
 @router.post("/api/invitations/accept")
 async def accept(req: AcceptRequest, conn: HTTPConnection, response: Response):
+    if not await auth.password_allowed(conn):
+        raise HTTPException(403, auth.PASSWORD_ONLY_INSIDE)
     inv, org, _ = await _pending(conn, req.token)
     auth.check_password_policy(req.password, inv.email)
     password_hash = await auth.hash_password(req.password)
@@ -455,6 +457,8 @@ class CompleteResetRequest(TokenRequest):
 
 @router.post("/api/password-resets/complete")
 async def complete_reset(req: CompleteResetRequest, conn: HTTPConnection, response: Response):
+    if not await auth.password_allowed(conn):
+        raise HTTPException(403, auth.PASSWORD_ONLY_INSIDE)
     reset, user, member, org = await _live_reset(conn, req.token)
     auth.check_password_policy(req.password, user.email)
     password_hash = await auth.hash_password(req.password)

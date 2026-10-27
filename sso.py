@@ -397,6 +397,7 @@ def _settings(conn: HTTPConnection, org: db.Organization) -> dict:
         "issuer": org.sso_issuer if org.sso_provider == "oidc" else "",
         "client_id": org.sso_client_id or "", "has_secret": bool(org.sso_client_secret),
         "redirect_uri": redirect_uri(conn, org), "public_url": org.public_url,
+        "password_anywhere": bool(org.sso_password_anywhere),
     }
 
 
@@ -416,6 +417,8 @@ class SsoSettings(BaseModel):
     client_id: str = Field(default="", max_length=255)
     # Write-only: empty keeps the saved one.
     client_secret: str = Field(default="", max_length=512)
+    # Passwords from the internet too (auth.password_allowed); off: only from the company network.
+    password_anywhere: bool = False
 
 
 @router.put("/api/org/sso")
@@ -439,8 +442,10 @@ async def put_settings(body: SsoSettings, conn: HTTPConnection):
                 raise HTTPException(422, "The identity provider did not answer for that tenant or issuer. Check it and try again.") from e
         org.sso_enabled, org.sso_provider, org.sso_issuer = body.enabled, body.provider, issuer
         org.sso_client_id, org.sso_client_secret = client_id or None, secret or None
+        org.sso_password_anywhere = body.password_anywhere
         await s.commit()
         await s.refresh(org)
     await auth.audit(conn, "org.sso_changed", me, target=body.provider,
-                     detail={"enabled": body.enabled, "secret_changed": bool(body.client_secret.strip())})
+                     detail={"enabled": body.enabled, "password_anywhere": body.password_anywhere,
+                             "secret_changed": bool(body.client_secret.strip())})
     return _settings(conn, org)

@@ -10,6 +10,7 @@ server, as the user that runs the gateway, from this directory:
 
     .venv/bin/python pilot_admin.py users
     .venv/bin/python pilot_admin.py set-password ana@acme.example
+    .venv/bin/python pilot_admin.py set-email ana@acme.exmple ana@acme.example
     .venv/bin/python pilot_admin.py device-key create "camera bridge" --save
     .venv/bin/python pilot_admin.py device-key create "latency probe" --role viewer
     .venv/bin/python pilot_admin.py device-key list
@@ -51,6 +52,32 @@ def users(_args) -> int:
             print(f"{user.email:40} {member.role:9} {state:9} {user.name}")
         if not rows:
             print(f"No accounts yet: open the app and use the setup code in {auth.SETUP_CODE_PATH}")
+    return 0
+
+
+def set_email(args) -> int:
+    """Correct an account's address — e.g. a typo made at first-run setup, which single sign-on
+    would never match (it finds people by the address their work account has)."""
+    old = args.old.strip().lower()
+    try:
+        new = auth.normalize_email(args.new)
+    except Exception as e:
+        print(getattr(e, "detail", str(e)), file=sys.stderr)
+        return 1
+    with _session() as s:
+        user = s.execute(select(db.User).where(db.User.email == old)).scalar()
+        if user is None:
+            print(f"No account for {old}.", file=sys.stderr)
+            return 1
+        if s.execute(select(db.User.id).where(db.User.email == new)).first():
+            print(f"{new} already has an account; nothing changed.", file=sys.stderr)
+            return 1
+        user.email = new
+        member = s.execute(select(db.Membership).where(db.Membership.user_id == user.id)).scalar()
+        s.add(db.AuditEvent(org_id=member.org_id if member else None, action="team.email_changed",
+                            target=new, detail={"from": old, "via": "pilot_admin.py on the server"}))
+        s.commit()
+    print(f"{old} is now {new}. Sign in with the new address (the password is unchanged).")
     return 0
 
 
@@ -133,6 +160,10 @@ def main() -> int:
     sp = sub.add_parser("set-password", help="set a user's password (signs them out)")
     sp.add_argument("email")
     sp.set_defaults(fn=set_password)
+    se = sub.add_parser("set-email", help="correct an account's email address")
+    se.add_argument("old")
+    se.add_argument("new")
+    se.set_defaults(fn=set_email)
     keys = sub.add_parser("device-key", help="API keys for machines (the camera bridge)")
     ksub = keys.add_subparsers(required=True)
     kc = ksub.add_parser("create", help="create a key; prints it once")

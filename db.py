@@ -113,6 +113,9 @@ class Organization(Base):
     sso_issuer: Mapped[str | None] = mapped_column(String(255), nullable=True)
     sso_client_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     sso_client_secret: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # With single sign-on on, a password works only from the company's network (auth.
+    # password_allowed) unless an owner allows it from the internet too.
+    sso_password_anywhere: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class User(Base):
