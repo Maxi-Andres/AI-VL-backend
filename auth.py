@@ -544,7 +544,7 @@ class ProfileUpdate(BaseModel):
 # the robot's microphone — arming it here must never leave another computer armed.
 PREFERENCES = frozenset({
     "theme", "speechVolume", "voiceURI", "spokenMode", "fillerMode", "voiceMode", "listenMode",
-    "speechOutput", "mapLayer", "chat",
+    "speechOutput", "mapLayer", "chat", "language",
 })
 PREFERENCE_MAX = 200  # characters per value
 
