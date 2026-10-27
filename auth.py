@@ -88,6 +88,8 @@ POLICY: dict[tuple[str, str], str] = {
     ("POST", "/api/invitations/accept"): PUBLIC,
     # manage_users — the team: who is in it, with what role (team.py).
     ("GET", "/api/team"): "manage_users",
+    ("GET", "/api/team/address"): "manage_users",   # the address invitation links point to
+    ("PUT", "/api/team/address"): "manage_users",
     ("GET", "/api/team/online"): AUTHENTICATED,   # who has Pilot open: names and colours only
     ("POST", "/api/team/invitations"): "manage_users",
     ("DELETE", "/api/team/invitations/{invitation_id}"): "manage_users",

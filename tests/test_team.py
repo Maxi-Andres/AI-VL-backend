@@ -210,3 +210,17 @@ def test_who_is_online(owner):
     engine.dispose()
     later = owner.get("/api/team/online").json()
     assert omar not in {p["id"] for p in later["online"]} and later["members"] == seen["members"]
+
+
+def test_links_point_to_the_companys_address(owner):
+    seen = owner.get("/api/team/address").json()
+    assert seen["public_url"] is None and isinstance(seen["candidates"], list)
+    assert all(not c["url"].startswith("http://127.") for c in seen["candidates"])   # never loopback
+    assert owner.put("/api/team/address", json={"public_url": "https://pilot.acme.example/x"}).status_code == 422
+    assert owner.put("/api/team/address", json={"public_url": "ftp://pilot.acme.example"}).status_code == 422
+    r = owner.put("/api/team/address", json={"public_url": " https://192.168.20.99:8443/ "})
+    assert r.json() == {"public_url": "https://192.168.20.99:8443"}
+    inv = owner.post("/api/team/invitations", json={"email": "far@acme.example", "role": "viewer"}).json()
+    assert inv["base_url"] == "https://192.168.20.99:8443"                   # not the admin's localhost
+    owner.put("/api/team/address", json={"public_url": ""})
+    assert owner.get("/api/team/address").json()["public_url"] is None

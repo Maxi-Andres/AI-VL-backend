@@ -100,6 +100,10 @@ class Organization(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     name: Mapped[str] = mapped_column(String(120))
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    # The address people use to reach this Pilot ("https://192.168.20.99:8443"). Invitation and
+    # reset links are built on it, not on whatever address the admin happened to open the page
+    # with — "localhost" works only on that one computer.
+    public_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
 
 class User(Base):

@@ -21,8 +21,11 @@ theirs, the way back is on the server: `pilot_admin.py set-password`.
 """
 from __future__ import annotations
 
+import asyncio
 import secrets
+import socket
 from datetime import timedelta
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException, Response
 from fastapi.requests import HTTPConnection
@@ -124,6 +127,87 @@ async def online(conn: HTTPConnection):
     return {"online": [{"id": i, "name": n, "color": c} for i, n, c in people], "members": members}
 
 
+# --------------------------------------------------------------------------- #
+# The address links point to
+# --------------------------------------------------------------------------- #
+# Interfaces that are never how a person reaches this machine: containers' bridges and the like.
+_NOT_REACHABLE = ("lo", "docker", "br-", "veth", "virbr", "cni", "flannel")
+
+
+async def _public_url(org_id: str) -> str | None:
+    async with db.SessionLocal() as s:
+        org = await s.get(db.Organization, org_id)
+    return org.public_url if org else None
+
+
+async def _host_addresses() -> list[tuple[str, str]]:
+    """(interface, IPv4) for each address of this machine a person could reach it on."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ip", "-4", "-o", "addr", "show",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=2)
+    except (OSError, TimeoutError):
+        out = b""
+    found = []
+    for line in out.decode(errors="replace").splitlines():
+        parts = line.split()
+        if len(parts) >= 4 and parts[2] == "inet":
+            iface, ip = parts[1], parts[3].split("/")[0]
+            if not iface.startswith(_NOT_REACHABLE):
+                found.append((iface, ip))
+    if not found:  # no `ip` here: the address the default route leaves from (sends nothing)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            try:
+                probe.connect(("192.0.2.1", 9))
+                found.append(("default", probe.getsockname()[0]))
+            except OSError:
+                pass
+    return found
+
+
+def _label(iface: str, ip: str) -> str:
+    if iface.startswith("tailscale") or ip.startswith("100."):
+        return "Tailscale — from anywhere, for people on your tailnet"
+    if iface.startswith(("wl", "wlan")):
+        return f"Wi-Fi ({iface}) — same network only"
+    return f"Local network ({iface}) — same network only"
+
+
+@router.get("/api/team/address")
+async def address(conn: HTTPConnection):
+    """The address links point to, and the ones this server can be reached on, with the scheme
+    and port of the page asking (what this server is actually serving)."""
+    me = _principal(conn)
+    scheme = conn.url.scheme.replace("ws", "http")
+    port = conn.url.port
+    default = (scheme == "https" and port == 443) or (scheme == "http" and port == 80)
+    suffix = f":{port}" if port and not default else ""
+    candidates = [{"url": f"{scheme}://{ip}{suffix}", "label": _label(iface, ip)}
+                  for iface, ip in await _host_addresses()]
+    return {"public_url": await _public_url(me.org_id), "candidates": candidates}
+
+
+class AddressBody(BaseModel):
+    public_url: str = Field(max_length=255)
+
+
+@router.put("/api/team/address")
+async def set_address(body: AddressBody, conn: HTTPConnection):
+    me = _principal(conn)
+    url = body.public_url.strip().rstrip("/")
+    if url:
+        parts = urlsplit(url)
+        if parts.scheme not in ("http", "https") or not parts.hostname or parts.path or parts.query or parts.fragment:
+            raise HTTPException(422, "Give the address as https://host:port — nothing after it.")
+    async with db.SessionLocal() as s:
+        org = await s.get(db.Organization, me.org_id)
+        org.public_url = url or None
+        await s.commit()
+    await auth.audit(conn, "team.address_changed", me, target=url or "(not set)")
+    return {"public_url": url or None}
+
+
 class InviteRequest(BaseModel):
     email: str = Field(max_length=254)
     role: str = Field(max_length=16)
@@ -155,8 +239,10 @@ async def invite(req: InviteRequest, conn: HTTPConnection):
         "invitation": {"id": inv.id, "email": email, "role": req.role,
                        "invited_by": me.name, "created_at": _iso(now),
                        "expires_at": _iso(inv.expires_at)},
-        # The only time the token leaves the server. The page turns it into a full URL.
+        # The only time the token leaves the server. The page turns it into a full URL, on
+        # the company's address when one is set (see /api/team/address).
         "link_path": f"/invite#token={token}",
+        "base_url": await _public_url(me.org_id),
     }
 
 
@@ -328,7 +414,8 @@ async def make_password_reset(user_id: str, conn: HTTPConnection):
         s.add(reset)
         await s.commit()
     await auth.audit(conn, "team.password_reset_link", me, target=user.email)
-    return {"link_path": f"/reset-password#token={token}", "expires_at": _iso(reset.expires_at)}
+    return {"link_path": f"/reset-password#token={token}", "expires_at": _iso(reset.expires_at),
+            "base_url": await _public_url(me.org_id)}
 
 
 async def _live_reset(conn: HTTPConnection, token: str):
