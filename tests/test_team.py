@@ -224,3 +224,23 @@ def test_links_point_to_the_companys_address(owner):
     assert inv["base_url"] == "https://192.168.20.99:8443"                   # not the admin's localhost
     owner.put("/api/team/address", json={"public_url": ""})
     assert owner.get("/api/team/address").json()["public_url"] is None
+
+
+def test_removing_a_member_signs_them_out_and_deletes_the_account(owner):
+    """Catches: a removed person keeping an open session, their account lingering (and with it
+    their password), or the rules of a role change not applying to a removal."""
+    person = _join(owner, "gone@acme.example", "operator")
+    gone = _member_id(owner, "gone@acme.example")
+    assert person.get("/api/auth/me").status_code == 200
+    assert owner.delete(f"/api/team/members/{gone}").status_code == 200
+    assert person.get("/api/auth/me").status_code == 401              # signed out at once
+    again = TestClient(gateway.app).post("/api/auth/login", json={"email": "gone@acme.example",
+                                                                  "password": PASSWORD})
+    assert again.status_code == 401                                   # no account any more
+    assert owner.delete(f"/api/team/members/{gone}").status_code == 404
+    assert owner.delete(f"/api/team/members/{_member_id(owner, OWNER['email'])}").status_code == 403
+
+
+def test_an_admin_cannot_remove_an_owner(owner):
+    admin = _join(owner, "adm2@acme.example", "admin")
+    assert admin.delete(f"/api/team/members/{_member_id(owner, OWNER['email'])}").status_code == 403

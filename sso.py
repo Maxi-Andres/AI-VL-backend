@@ -270,9 +270,12 @@ async def _exchange(doc: dict, org: db.Organization, code: str, flow: dict) -> d
     except (httpx.HTTPError, ValueError) as e:
         raise ProviderError(f"token request failed: {type(e).__name__}") from e
     if r.status_code != 200 or not isinstance(body, dict) or not isinstance(body.get("id_token"), str):
-        # The error code only: the provider's description can echo what was sent.
+        # The error code and Microsoft's numeric codes (AADSTS7000215 = wrong secret, 7000222 =
+        # expired secret…) — never the description, which can echo what was sent.
         err = body.get("error") if isinstance(body, dict) else None
-        raise ProviderError(f"token endpoint answered {r.status_code} {err or ''}".strip())
+        codes = body.get("error_codes") if isinstance(body, dict) else None
+        tail = f" AADSTS{','.join(str(c) for c in codes[:3])}" if isinstance(codes, list) and codes else ""
+        raise ProviderError(f"token endpoint answered {r.status_code} {err or ''}{tail}".strip())
     return body
 
 

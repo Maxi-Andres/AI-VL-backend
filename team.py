@@ -30,7 +30,7 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, HTTPException, Response
 from fastapi.requests import HTTPConnection
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 
 import auth
 import db
@@ -306,6 +306,50 @@ async def update_member(user_id: str, req: MemberUpdate, conn: HTTPConnection):
         await s.commit()
     signed_out = await auth.revoke_user_sessions(user_id)
     await auth.audit(conn, "team.member_changed", me, target=user.email, detail=changes)
+    return {"ok": True, "signed_out": signed_out}
+
+
+@router.delete("/api/team/members/{user_id}")
+async def remove_member(user_id: str, conn: HTTPConnection):
+    """Take someone out of the company for good (Disable keeps the account to switch back on).
+    The same rules as a change: not yourself, nobody ranked above you, never the last active
+    owner. Signed out everywhere first; then the membership goes, and the account with it when
+    it belongs to no other company — their conversations, sessions and reset links with it. The
+    audit log keeps what they did."""
+    me = _principal(conn)
+    if user_id == me.user_id:
+        raise HTTPException(403, "You cannot remove yourself.")
+    async with db.SessionLocal() as s:
+        row = (await s.execute(
+            select(db.User, db.Membership)
+            .join(db.Membership, db.Membership.user_id == db.User.id)
+            .where(db.User.id == user_id, db.Membership.org_id == me.org_id)
+        )).first()
+        if row is None:
+            raise HTTPException(404, "No such member.")
+        user, member = row
+        _check_rank(me, member.role, what="remove someone with")
+        if member.role == "owner" and user.is_active:
+            owners = (await s.execute(
+                select(func.count()).select_from(db.Membership)
+                .join(db.User, db.User.id == db.Membership.user_id)
+                .where(db.Membership.org_id == me.org_id, db.Membership.role == "owner",
+                       db.User.is_active.is_(True))
+            )).scalar_one()
+            if owners <= 1:
+                raise HTTPException(409, "The company needs at least one active owner.")
+        email, role = user.email, member.role
+    signed_out = await auth.revoke_user_sessions(user_id)
+    async with db.SessionLocal() as s:
+        await s.execute(delete(db.Membership).where(db.Membership.user_id == user_id,
+                                                    db.Membership.org_id == me.org_id))
+        others = (await s.execute(select(func.count()).select_from(db.Membership)
+                                  .where(db.Membership.user_id == user_id))).scalar_one()
+        if not others:
+            await s.execute(delete(db.User).where(db.User.id == user_id))
+        await s.commit()
+    auth._forget_cached(user_id)
+    await auth.audit(conn, "team.member_removed", me, target=email, detail={"role": role})
     return {"ok": True, "signed_out": signed_out}
 
 

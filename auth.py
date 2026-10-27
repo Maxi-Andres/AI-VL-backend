@@ -101,6 +101,7 @@ POLICY: dict[tuple[str, str], str] = {
     ("POST", "/api/team/invitations"): "manage_users",
     ("DELETE", "/api/team/invitations/{invitation_id}"): "manage_users",
     ("PATCH", "/api/team/members/{user_id}"): "manage_users",
+    ("DELETE", "/api/team/members/{user_id}"): "manage_users",
     ("POST", "/api/team/members/{user_id}/password-reset"): "manage_users",
     # Setting a new password through a reset link: the token is the credential (team.py).
     ("POST", "/api/password-resets/lookup"): PUBLIC,
