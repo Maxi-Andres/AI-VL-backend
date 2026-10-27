@@ -681,6 +681,11 @@ class Conn:
         self.frame_q = asyncio.Queue(maxsize=1) if is_viewer else None
         self.config_q: asyncio.Queue = asyncio.Queue(maxsize=8)
         self.send_lock = asyncio.Lock()
+        # Who is on this socket, for the header's "people online" list. Kept by reference,
+        # so a name or colour changed in Settings shows on the next poll. Only a signed-in
+        # person is someone: a device key (the camera bridge) is a machine, never listed.
+        p = ws.scope.get("principal")
+        self.person = p if p is not None and p.kind == "user" and p.user_id else None
 
     async def send(self, msg) -> None:
         async with self.send_lock:
@@ -727,6 +732,23 @@ class Hub:
             "viewers": viewers,
             "total": len(self.conns),
         }
+
+    def web_people(self) -> list[dict]:
+        """The people behind those browsers, one entry per person however many tabs they
+        have open, and what they are doing: streaming their camera in, watching, or both.
+        Name, colour and id only — enough for an avatar, never an email or a credential."""
+        people: dict[str, dict] = {}
+        for c in self.conns:
+            p = c.person
+            if p is None:
+                continue
+            e = people.setdefault(p.user_id, {
+                "user_id": p.user_id, "name": p.name, "color": p.color or None,
+                "streaming": False, "watching": False, "sockets": 0,
+            })
+            e["sockets"] += 1
+            e["watching" if c.is_viewer else "streaming"] = True
+        return sorted(people.values(), key=lambda e: (e["name"].casefold(), e["user_id"]))
 
     def apply_config(self, upd: dict, origin: "Conn | None" = None) -> None:
         """Merge an update into the shared config; if anything actually changed,
@@ -1494,8 +1516,8 @@ async def _probe_iacore() -> bool:
 @app.get("/api/presence")
 async def presence():
     """Who is connected right now, for the header pills: the robot-camera producer
-    (and which robot it is streaming), the browsers on the hub, and whether the
-    executor / iacore answer.
+    (and which robot it is streaming), the browsers on the hub and the people behind
+    them, and whether the executor / iacore answer.
 
     Cached for PRESENCE_TTL and serialized on a lock so N polling browsers cost ONE
     probe round — the bridge and the executor are single-threaded HTTP servers that
@@ -1514,7 +1536,7 @@ async def presence():
         )
         b, e = bridge or {}, executor or {}
         data = {
-            "web": hub.web_counts(),
+            "web": {**hub.web_counts(), "people": hub.web_people()},
             "robot_cam": {
                 **robot_cam.snapshot(),
                 # `bridge`/`streaming` are the bridge's self-report; `live` above is
