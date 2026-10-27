@@ -119,6 +119,9 @@ class User(Base):
     color: Mapped[str] = mapped_column(String(16), default=random_color)
     # Notifications (the bell) newer than this are unread for this person.
     notifications_seen_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    # How Pilot looks and talks for this person — theme, voice, volume… — so it follows them to
+    # any computer. A flat {name: value} of strings; the names allowed are auth.PREFERENCES.
+    preferences: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class Membership(Base):

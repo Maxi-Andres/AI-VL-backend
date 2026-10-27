@@ -32,6 +32,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select, update
 
 import auth
+import backup
 import db
 
 ROBOT_SLOTS = {"go2": "Unitree Go2", "g1": "Unitree G1"}
@@ -423,3 +424,20 @@ async def notifications_seen(conn: HTTPConnection):
                             .values(notifications_seen_at=db.utcnow()))
             await s.commit()
     return {"ok": True}
+
+
+# --------------------------------------------------------------------------- #
+# Backups (backup.py): the owner sees them and can make one now
+# --------------------------------------------------------------------------- #
+@router.get("/api/backups")
+async def backups(conn: HTTPConnection):
+    return {"dir": str(backup.BACKUP_DIR), "keep": backup.BACKUP_KEEP,
+            "every_hours": backup.BACKUP_HOURS, "backups": backup.listing()}
+
+
+@router.post("/api/backups")
+async def backup_now(conn: HTTPConnection):
+    me = _principal(conn)
+    made = await backup.run_now()
+    await auth.audit(conn, "org.backup", me, target=made["name"])
+    return made

@@ -82,6 +82,8 @@ POLICY: dict[tuple[str, str], str] = {
     ("POST", "/api/auth/logout"): AUTHENTICATED,
     ("GET", "/api/auth/me"): AUTHENTICATED,
     ("PATCH", "/api/auth/me"): AUTHENTICATED,          # your own name (Settings → Profile)
+    ("GET", "/api/auth/preferences"): AUTHENTICATED,   # your own preferences, any computer
+    ("PATCH", "/api/auth/preferences"): AUTHENTICATED,
     ("POST", "/api/auth/password"): AUTHENTICATED,     # your own password, knowing the current
     # Joining through an invitation: the token in the body is the credential (team.py).
     ("POST", "/api/invitations/lookup"): PUBLIC,
@@ -146,6 +148,9 @@ POLICY: dict[tuple[str, str], str] = {
     ("POST", "/api/robot-camera/config"): "configure",
     # configure, sites and robots (fleet.py).
     ("GET", "/api/activity"): "configure",
+    # manage_org — the company's own data: its backups (backup.py).
+    ("GET", "/api/backups"): "manage_org",
+    ("POST", "/api/backups"): "manage_org",
     # The bell: each person's own notifications (what they may see is decided in fleet.py).
     ("GET", "/api/notifications"): AUTHENTICATED,
     ("POST", "/api/notifications/seen"): AUTHENTICATED,
@@ -534,6 +539,21 @@ class ProfileUpdate(BaseModel):
     color: str | None = Field(default=None, max_length=16)
 
 
+# The preferences a person carries between computers, by name. Anything that belongs to ONE
+# console stays in that browser instead: arming the robot for commands, the robot it works with,
+# the robot's microphone — arming it here must never leave another computer armed.
+PREFERENCES = frozenset({
+    "theme", "speechVolume", "voiceURI", "spokenMode", "fillerMode", "voiceMode", "listenMode",
+    "speechOutput", "mapLayer", "chat",
+})
+PREFERENCE_MAX = 200  # characters per value
+
+
+class PreferencesUpdate(BaseModel):
+    # A value of null forgets that preference.
+    values: dict[str, str | None]
+
+
 class PasswordChange(BaseModel):
     current_password: str = Field(max_length=PASSWORD_MAX)
     new_password: str = Field(max_length=PASSWORD_MAX)
@@ -758,3 +778,34 @@ async def change_password(body: PasswordChange, conn: HTTPConnection):
     _fails.pop((ip, key), None)
     await audit(conn, "auth.password_changed", principal, detail={"signed_out": len(others)})
     return {"ok": True, "signed_out": len(others)}
+
+
+@router.get("/preferences")
+async def preferences(conn: HTTPConnection):
+    principal = _person(conn)
+    async with db.SessionLocal() as s:
+        user = await s.get(db.User, principal.user_id)
+    return {"values": (user.preferences if user else None) or {}}
+
+
+@router.patch("/preferences")
+async def update_preferences(body: PreferencesUpdate, conn: HTTPConnection):
+    """Merge into this person's preferences. Unknown names are refused, not kept: this is not
+    a place to store anything a page likes."""
+    principal = _person(conn)
+    unknown = set(body.values) - PREFERENCES
+    if unknown:
+        raise HTTPException(422, f"Unknown preference {sorted(unknown)[0]!r}.")
+    if any(v is not None and len(v) > PREFERENCE_MAX for v in body.values.values()):
+        raise HTTPException(422, f"A preference is at most {PREFERENCE_MAX} characters.")
+    async with db.SessionLocal() as s:
+        user = await s.get(db.User, principal.user_id)
+        merged = {**(user.preferences or {})}
+        for k, v in body.values.items():
+            if v is None:
+                merged.pop(k, None)
+            else:
+                merged[k] = v
+        user.preferences = merged  # a new dict: SQLAlchemy sees the change
+        await s.commit()
+    return {"values": merged}

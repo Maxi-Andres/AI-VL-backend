@@ -185,6 +185,19 @@ def test_you_change_your_own_name_and_password(tc):
     tc.cookies.clear()
 
 
+def test_preferences_follow_the_person(tc):
+    _owner_signed_in(tc)
+    assert tc.get("/api/auth/preferences").json() == {"values": {}}
+    r = tc.patch("/api/auth/preferences", json={"values": {"theme": "dark", "speechVolume": "0.4"}})
+    assert r.json()["values"] == {"theme": "dark", "speechVolume": "0.4"}
+    tc.patch("/api/auth/preferences", json={"values": {"theme": None, "mapLayer": "street"}})
+    assert tc.get("/api/auth/preferences").json()["values"] == {"speechVolume": "0.4", "mapLayer": "street"}
+    assert tc.patch("/api/auth/preferences", json={"values": {"execEnabled": "1"}}).status_code == 422
+    assert tc.patch("/api/auth/preferences", json={"values": {"chat": "x" * 201}}).status_code == 422
+    tc.cookies.clear()
+    assert tc.get("/api/auth/preferences").status_code == 401
+
+
 def test_failures_look_the_same_and_are_throttled(tc):
     _owner_signed_in(tc)
     tc.cookies.clear()

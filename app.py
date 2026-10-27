@@ -46,6 +46,7 @@ from pydantic import BaseModel
 from websockets.asyncio.client import connect as ws_connect
 
 import auth
+import backup
 import chats
 import fleet
 import robot_watch
@@ -94,9 +95,11 @@ async def lifespan(app):
         timeout=httpx.Timeout(connect=5.0, read=320.0, write=30.0, pool=5.0),
     )
     watch = robot_watch.start(EXECUTOR_URL)
+    backups = backup.start()
     try:
         yield
     finally:
+        await backup.stop(backups)
         await robot_watch.stop(watch)
         await client.aclose()
 

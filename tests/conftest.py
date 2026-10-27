@@ -32,6 +32,8 @@ os.environ["PILOT_DATA_DIR"] = tempfile.mkdtemp(prefix="pilot-test-")
 os.environ.pop("DATABASE_URL", None)
 # No background robot watcher: the tests drive robot_watch.record() themselves.
 os.environ["ROBOT_WATCH_SECONDS"] = "0"
+# No daily backup in the background either: tests/test_backup.py runs one when it wants one.
+os.environ["PILOT_BACKUP_HOURS"] = "0"
 
 
 def pytest_configure(config):

@@ -17,8 +17,8 @@ It holds **NO** detection logic and **NO** model deps (no ultralytics/torch/pill
 `auth.py` (who may call what — `POLICY`, default deny), `team.py` (invitations, roles,
 password resets), `fleet.py` (sites, floor plans, robots), `robot_watch.py` (a background
 loop that keeps each robot's last known state: online since, last seen, latency, battery),
-`chats.py` (the vision assistant's conversations, private to each person), `db.py` (SQLite via
-SQLAlchemy) and `migrations/` (Alembic, applied on startup). **Every new route needs a `POLICY` entry** or it
+`chats.py` (the vision assistant's conversations, private to each person), `backup.py` (a
+dated copy of PILOT_DATA_DIR every day, the last few kept), `db.py` (SQLite via SQLAlchemy) and `migrations/` (Alembic, applied on startup). **Every new route needs a `POLICY` entry** or it
 is refused; `tests/test_auth.py` fails until it has one. It is more than a plain
 proxy: it runs a **session Hub** where one phone produces frames on `/ws/detect`
 and N read-only monitors mirror them on `/ws/view`, relays each frame to iacore's
