@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 import app as gateway
 import auth
+import db
 import fleet
 import robot_watch
 
@@ -100,13 +101,18 @@ def test_a_viewer_sees_but_cannot_change(owner):
 
 def test_the_activity_feed(owner):
     owner.post("/api/sites", json={"name": "Feed Site"})
-    feed = owner.get("/api/activity").json()
+    page = owner.get("/api/activity").json()
+    feed, total = page["events"], page["total"]
     assert feed[0]["action"] == "fleet.site_created" and feed[0]["target"] == "Feed Site"
-    assert feed[0]["actor"] == "Ana Owner"
+    assert feed[0]["actor"] == "Ana Owner" and total >= len(feed)
     assert all(e["action"] != "auth.login" for e in feed)          # sign-ins stay out of it
-    first, second = (owner.get("/api/activity", params={"limit": 1, "offset": o}).json() for o in (0, 1))
+    first, second = (owner.get("/api/activity", params={"limit": 1, "offset": o}).json()["events"]
+                     for o in (0, 1))
     assert len(first) == len(second) == 1 and first[0]["id"] == feed[0]["id"] != second[0]["id"]
     assert second[0]["id"] == feed[1]["id"]                          # pages follow on
+    sites = owner.get("/api/activity", params={"kind": "sites"}).json()
+    assert sites["total"] < total and all(e["action"].startswith("fleet.site") for e in sites["events"])
+    assert owner.get("/api/activity", params={"kind": "nope"}).status_code == 422
 
 
 def test_the_last_known_state_survives_the_robot(owner, monkeypatch):
@@ -137,6 +143,19 @@ def test_the_last_known_state_survives_the_robot(owner, monkeypatch):
     st = status()
     assert st["online"] is False and st["since"] != since and st["battery_pct"] == 78.4
     assert st["last_seen_at"] is not None                            # when it was last there
-    feed = owner.get("/api/activity").json()
+    feed = owner.get("/api/activity").json()["events"]
     assert feed[0]["action"] == "robot.offline" and feed[0]["target"] == "Watch Dog"
+    bell = owner.get("/api/notifications").json()                   # robots tell everyone
+    assert bell["events"][0]["action"] == "robot.offline" and bell["unread"] >= 1
+    assert all(e["actor"] != "Ana Owner" for e in bell["events"])    # never your own doings
+    assert owner.post("/api/notifications/seen").status_code == 200
+    assert owner.get("/api/notifications").json()["unread"] == 0
     owner.delete(f"/api/robots/{rid}")
+
+
+def test_robots_get_a_colour_and_can_change_it(owner):
+    r = owner.post("/api/robots", json={"name": "Painted", "slot": "g1"}).json()
+    assert r["color"] in db.COLORS                                   # random, from the palette
+    assert owner.patch(f"/api/robots/{r['id']}", json={"color": "rose"}).json()["color"] == "rose"
+    assert owner.patch(f"/api/robots/{r['id']}", json={"color": "#ff0000"}).status_code == 422
+    owner.delete(f"/api/robots/{r['id']}")

@@ -80,7 +80,7 @@ async def team(conn: HTTPConnection):
         )).all()
     return {
         "members": [
-            {"id": u.id, "name": u.name, "email": u.email, "role": m.role,
+            {"id": u.id, "name": u.name, "email": u.email, "role": m.role, "color": u.color,
              "active": u.is_active, "last_login_at": _iso(u.last_login_at),
              "joined_at": _iso(m.created_at), "you": u.id == me.user_id}
             for u, m in members

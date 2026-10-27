@@ -163,6 +163,9 @@ def test_you_change_your_own_name_and_password(tc):
     assert tc.patch("/api/auth/me", json={"name": "  Pat Doe "}).json()["user"]["name"] == "Pat Doe"
     assert tc.get("/api/auth/me").json()["user"]["name"] == "Pat Doe"   # not the cached name
     assert tc.patch("/api/auth/me", json={"name": "   "}).status_code == 422
+    assert tc.get("/api/auth/me").json()["user"]["color"] in db.COLORS   # one at random
+    assert tc.patch("/api/auth/me", json={"color": "violet"}).json()["user"]["color"] == "violet"
+    assert tc.patch("/api/auth/me", json={"color": "red"}).status_code == 422
 
     wrong = tc.post("/api/auth/password", json={"current_password": "nope" * 4,
                                                 "new_password": "a brand new password"})

@@ -136,6 +136,9 @@ POLICY: dict[tuple[str, str], str] = {
     ("POST", "/api/robot-camera/config"): "configure",
     # configure, sites and robots (fleet.py).
     ("GET", "/api/activity"): "configure",
+    # The bell: each person's own notifications (what they may see is decided in fleet.py).
+    ("GET", "/api/notifications"): AUTHENTICATED,
+    ("POST", "/api/notifications/seen"): AUTHENTICATED,
     ("POST", "/api/sites"): "configure",
     ("PATCH", "/api/sites/{site_id}"): "configure",
     ("DELETE", "/api/sites/{site_id}"): "configure",
@@ -194,6 +197,7 @@ class Principal:
     user_id: str | None = None
     name: str = ""
     email: str = ""
+    color: str = ""
     expires_at: datetime | None = None
     cached_at: float = field(default_factory=time.monotonic)
 
@@ -269,7 +273,8 @@ async def _load_session(th: str) -> Principal | None:
             await s.commit()
         return Principal(
             kind="user", org_id=sess.org_id, role=member.role, credential_id=th,
-            user_id=user.id, name=user.name, email=user.email, expires_at=sess.expires_at,
+            user_id=user.id, name=user.name, email=user.email, color=user.color,
+            expires_at=sess.expires_at,
         )
 
 
@@ -515,7 +520,8 @@ class LoginRequest(BaseModel):
 
 
 class ProfileUpdate(BaseModel):
-    name: str = Field(min_length=1, max_length=120)
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    color: str | None = Field(default=None, max_length=16)
 
 
 class PasswordChange(BaseModel):
@@ -533,7 +539,8 @@ class SetupRequest(BaseModel):
 
 def _me(principal: Principal, org_name: str) -> dict:
     return {
-        "user": {"id": principal.user_id, "name": principal.name, "email": principal.email},
+        "user": {"id": principal.user_id, "name": principal.name, "email": principal.email,
+                 "color": principal.color},
         "org": {"id": principal.org_id, "name": org_name},
         "role": principal.role,
         "permissions": sorted(principal.permissions),
@@ -566,7 +573,8 @@ async def _start_session(conn: HTTPConnection, response: Response, user: db.User
         max_age=int(LONG_SESSION.total_seconds()) if remember else None,
     )
     return Principal(kind="user", org_id=org_id, role=role, credential_id=token_hash(token),
-                     user_id=user.id, name=user.name, email=user.email, expires_at=expires)
+                     user_id=user.id, name=user.name, email=user.email, color=user.color,
+                     expires_at=expires)
 
 
 @router.get("/state")
@@ -687,15 +695,24 @@ def _forget_cached(user_id: str) -> None:
 @router.patch("/me")
 async def update_me(body: ProfileUpdate, conn: HTTPConnection):
     principal = _person(conn)
-    name = body.name.strip()
-    if not name:
-        raise HTTPException(422, "Your name cannot be empty.")
-    async with db.SessionLocal() as s:
-        await s.execute(update(db.User).where(db.User.id == principal.user_id).values(name=name))
-        await s.commit()
-    _forget_cached(principal.user_id)
-    await audit(conn, "auth.profile_changed", principal, target=name)
-    principal.name = name
+    values: dict[str, str] = {}
+    if body.name is not None:
+        if not body.name.strip():
+            raise HTTPException(422, "Your name cannot be empty.")
+        values["name"] = body.name.strip()
+    if body.color is not None:
+        if body.color not in db.COLORS:
+            raise HTTPException(422, f"Unknown colour {body.color!r}.")
+        values["color"] = body.color
+    if values:
+        async with db.SessionLocal() as s:
+            await s.execute(update(db.User).where(db.User.id == principal.user_id).values(**values))
+            await s.commit()
+        _forget_cached(principal.user_id)
+        if "name" in values:  # a colour is not worth a line in the company's activity
+            await audit(conn, "auth.profile_changed", principal, target=values["name"])
+        principal.name = values.get("name", principal.name)
+        principal.color = values.get("color", principal.color)
     return _me(principal, await _org_name(principal.org_id))
 
 

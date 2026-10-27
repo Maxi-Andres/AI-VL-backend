@@ -15,6 +15,7 @@ Config via env:
 from __future__ import annotations
 
 import os
+import random
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,6 +26,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     TypeDecorator,
@@ -51,6 +53,16 @@ def ensure_data_dir() -> None:
 
 def new_id() -> str:
     return uuid.uuid4().hex
+
+
+# The colours a person or a robot can wear (their avatar, their icon). Each gets one at random
+# when created — so a team reads apart at a glance — and may change it. Names, not hex: the
+# frontend owns the actual shades for its light and dark themes.
+COLORS = ("teal", "indigo", "amber", "rose", "green", "violet", "sky", "slate")
+
+
+def random_color() -> str:
+    return random.choice(COLORS)  # noqa: S311  # a cosmetic pick, not a secret
 
 
 def utcnow() -> datetime:
@@ -100,6 +112,9 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     last_login_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    color: Mapped[str] = mapped_column(String(16), default=random_color)
+    # Notifications (the bell) newer than this are unread for this person.
+    notifications_seen_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
 
 
 class Membership(Base):
@@ -233,6 +248,7 @@ class Robot(Base):
     slot: Mapped[str] = mapped_column(String(16))
     serial: Mapped[str] = mapped_column(String(80), default="")
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    color: Mapped[str] = mapped_column(String(16), default=random_color)
     # Last known state, written by robot_watch.py every few seconds whether or not anyone has
     # the app open — so a card can say "offline · 2 h" and still show the last battery.
     # None everywhere means never measured (no ping address configured, or not yet).
@@ -251,6 +267,8 @@ class AuditEvent(Base):
     deletes these rows."""
 
     __tablename__ = "audit_events"
+    # The activity log reads one company's events newest first, a page at a time.
+    __table_args__ = (Index("ix_audit_events_org_at", "org_id", "at"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, index=True)
     org_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
