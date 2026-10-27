@@ -1544,7 +1544,7 @@ async def _probe_iacore() -> "dict | None":
 async def presence():
     """Who is connected right now, for the header pills: the robot-camera producer
     (and which robot it is streaming), the browsers on the hub and the people behind
-    them, whether the executor / iacore / the VLM server answer, and how full the GPU is.
+    them, whether the executor / iacore / the VLM server answer, and the graphics cards.
 
     Cached for PRESENCE_TTL and serialized on a lock so N polling browsers cost ONE
     probe round — the bridge and the executor are single-threaded HTTP servers that
@@ -1585,8 +1585,10 @@ async def presence():
                 # The VLM server (llama-server or Ollama) is its own process: it can be down
                 # while iacore answers. None when this iacore cannot tell.
                 "vlm": (iacore or {}).get("vlm"),
-                # The whole card, every process on it: {used_mb, total_mb, name} or None.
-                "gpu": (iacore or {}).get("gpu"),
+                # The graphics cards the AI can use, each {vendor, name, used_mb, total_mb}
+                # (memory None where the driver does not say); [] = none found, None = this
+                # iacore cannot tell (down or older).
+                "gpus": (iacore or {}).get("gpus"),
             },
         }
         _presence_cache = (now, data)
