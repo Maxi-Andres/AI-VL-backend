@@ -262,6 +262,40 @@ class Robot(Base):
     battery_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
 
 
+class Chat(Base):
+    """One conversation with the vision assistant (Live). Private to the person who had it:
+    no role, not even an owner's, reads another person's chats."""
+
+    __tablename__ = "chats"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    org_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("organizations.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    title: Mapped[str] = mapped_column(String(120), default="")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+
+
+class ChatMessage(Base):
+    """One exchange in a chat: what was asked — a question, or a scan for objects — and what
+    came back, with the robot it was about."""
+
+    __tablename__ = "chat_messages"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chat_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("chats.id", ondelete="CASCADE"), index=True
+    )
+    at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    kind: Mapped[str] = mapped_column(String(16))        # "question" | "analysis"
+    question: Mapped[str] = mapped_column(String(4000))
+    answer: Mapped[str] = mapped_column(String(20000))
+    status: Mapped[str] = mapped_column(String(300), default="")
+    robot: Mapped[str] = mapped_column(String(16), default="")
+
+
 class AuditEvent(Base):
     """Who did what, when, from where. Append-only by convention: nothing updates or
     deletes these rows."""

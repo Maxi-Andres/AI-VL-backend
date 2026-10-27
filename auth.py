@@ -116,6 +116,13 @@ POLICY: dict[tuple[str, str], str] = {
     ("GET", "/api/sites/{site_id}/plan"): "view",
     # analyze — spend GPU on the models; nothing reaches the robot.
     ("POST", "/api/vlm"): "analyze",
+    # The assistant's conversations, each private to its person (chats.py checks the owner).
+    ("GET", "/api/chats"): "analyze",
+    ("GET", "/api/chats/{chat_id}"): "analyze",
+    ("POST", "/api/chats/messages"): "analyze",
+    ("POST", "/api/chats/{chat_id}/messages"): "analyze",
+    ("PATCH", "/api/chats/{chat_id}"): "analyze",
+    ("DELETE", "/api/chats/{chat_id}"): "analyze",
     ("POST", "/api/vlm/stream"): "analyze",
     ("POST", "/api/detect"): "analyze",
     ("POST", "/api/transcribe"): "analyze",

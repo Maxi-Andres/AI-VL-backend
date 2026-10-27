@@ -46,6 +46,7 @@ from pydantic import BaseModel
 from websockets.asyncio.client import connect as ws_connect
 
 import auth
+import chats
 import fleet
 import robot_watch
 import team
@@ -107,6 +108,7 @@ app = FastAPI(title="backend — gateway", lifespan=lifespan,
 app.include_router(auth.router)
 app.include_router(team.router)
 app.include_router(fleet.router)
+app.include_router(chats.router)
 # Credentials (the session cookie) only for origins named explicitly — never with "*". The
 # deploy is same-origin and needs no CORS at all; this is for the vite dev server on :5173,
 # which calls :8000 directly: run the gateway with CORS_ORIGINS=http://localhost:5173.
