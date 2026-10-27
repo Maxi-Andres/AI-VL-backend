@@ -93,6 +93,37 @@ async def team(conn: HTTPConnection):
     }
 
 
+# Online means a live session that made a request lately. Sessions note that at most once a
+# minute (auth.TOUCH_EVERY) and every open page polls more often, so three minutes is
+# "has the app open" without flickering between polls.
+ONLINE_WINDOW = timedelta(minutes=3)
+
+
+@router.get("/api/team/online")
+async def online(conn: HTTPConnection):
+    """Who in the company has Pilot open right now, out of how many active members. Names and
+    colours only, so everyone may see it (the Fleet greeting and its Team figure)."""
+    me = _principal(conn)
+    now = db.utcnow()
+    async with db.SessionLocal() as s:
+        people = (await s.execute(
+            select(db.User.id, db.User.name, db.User.color)
+            .join(db.AuthSession, db.AuthSession.user_id == db.User.id)
+            .where(db.AuthSession.org_id == me.org_id,
+                   db.AuthSession.revoked_at.is_(None),
+                   db.AuthSession.expires_at > now,
+                   db.AuthSession.last_seen_at > now - ONLINE_WINDOW,
+                   db.User.is_active.is_(True))
+            .distinct()
+        )).all()
+        members = (await s.execute(
+            select(func.count()).select_from(db.Membership)
+            .join(db.User, db.User.id == db.Membership.user_id)
+            .where(db.Membership.org_id == me.org_id, db.User.is_active.is_(True))
+        )).scalar_one()
+    return {"online": [{"id": i, "name": n, "color": c} for i, n, c in people], "members": members}
+
+
 class InviteRequest(BaseModel):
     email: str = Field(max_length=254)
     role: str = Field(max_length=16)

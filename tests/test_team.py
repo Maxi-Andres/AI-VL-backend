@@ -191,3 +191,22 @@ def test_who_may_make_a_reset_link(owner):
     viewer = _join(owner, "vik@acme.example", "viewer")
     vik = _member_id(owner, "vik@acme.example")
     assert viewer.post(f"/api/team/members/{vik}/password-reset").status_code == 403
+
+
+def test_who_is_online(owner):
+    viewer = _join(owner, "omar@acme.example", "viewer")
+    omar = viewer.get("/api/auth/me").json()["user"]["id"]
+    seen = viewer.get("/api/team/online").json()                    # everyone may ask
+    ids = {p["id"] for p in seen["online"]}
+    assert omar in ids and "Ana Owner" in {p["name"] for p in seen["online"]}
+    assert seen["members"] >= 2
+    assert all(set(p) == {"id", "name", "color"} for p in seen["online"])   # no emails
+    # Gone quiet for longer than the window: no longer online, still a member.
+    engine = create_engine(db.sync_url())
+    with Session(engine) as s:
+        s.execute(update(db.AuthSession).where(db.AuthSession.user_id == omar)
+                  .values(last_seen_at=db.utcnow() - timedelta(minutes=10)))
+        s.commit()
+    engine.dispose()
+    later = owner.get("/api/team/online").json()
+    assert omar not in {p["id"] for p in later["online"]} and later["members"] == seen["members"]
