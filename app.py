@@ -222,6 +222,10 @@ class VlmStreamRequest(BaseModel):
     robot_notes: list[str] | None = Field(default=None, exclude=True)
 
 
+class KeepRequest(BaseModel):
+    text: str = Field("", max_length=4000)
+
+
 class SpeakRequest(BaseModel):
     text: str = ""
     voice: str | None = None
@@ -365,7 +369,9 @@ async def vlm_stream(req: VlmStreamRequest, request: Request):
     was asked to keep (memory.py). "Guardá esta imagen" / "acordate que…" are done here, with
     no model: the answer says it was kept."""
     principal = request.scope.get("principal")
-    if principal is not None and (cmd := memory.command(req.prompt)):
+    if principal is not None and (cmd := await memory.decide(
+            req.prompt, lambda text: client.post("/keep", json=KeepRequest(text=text).model_dump(),
+                                                 timeout=3.0))):
         said = await memory.handle(request, req.robot, cmd, req.image, req.prompt)
         return StreamingResponse(iter([said.encode()]), media_type="text/plain; charset=utf-8")
     body = req.model_dump(exclude_none=True)

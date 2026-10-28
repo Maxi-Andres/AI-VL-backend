@@ -89,6 +89,27 @@ def command(prompt: str) -> tuple[str, str] | None:
     return None
 
 
+async def decide(prompt: str, ask_iacore) -> tuple[str, str] | None:
+    """What `prompt` asks to keep: the VLM server decides (iacore /keep, any wording, both
+    languages — patterns missed every new one Whisper wrote); `command()`'s patterns only when
+    it cannot be asked. A question is never a request unless a polite one — that is grammar,
+    decided here without asking. `ask_iacore(text)` posts to /keep and returns the response."""
+    text = unicodedata.normalize("NFC", (prompt or "").strip())
+    plain = _plain(text)
+    if not plain or ("?" in plain and not _ASKS_POLITELY.match(plain)):
+        return None
+    try:
+        said = (await ask_iacore(text)).json()
+        if said.get("decided"):
+            if said.get("keep") == "picture":
+                return ("image", "")
+            note = str(said.get("note") or "").strip()
+            return ("note", note[:NOTE_CHARS]) if said.get("keep") == "note" and note else None
+    except Exception:  # iacore down or old: the patterns still work
+        pass
+    return command(text)
+
+
 def _spanish(text: str) -> bool:
     if re.search(r"[¿¡ñáéíóú]", text, re.IGNORECASE):
         return True

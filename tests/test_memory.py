@@ -80,11 +80,19 @@ def tc():
         yield tc
 
 
+KEEP = {}            # what iacore's /keep answers in a test; {} = it could not decide
+
+
 @pytest.fixture
 def iacore(tc, monkeypatch):
     got = []
+    KEEP.clear()
+    KEEP["asked"] = []
 
     def handle(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/keep":
+            KEEP["asked"].append(json.loads(req.content)["text"])
+            return httpx.Response(200, json=KEEP.get("says", {"decided": False}))
         got.append(json.loads(req.content))
         return httpx.Response(200, content=b"En el cajon.")
 
@@ -148,3 +156,21 @@ def test_deleting_takes_the_file_too(tc, iacore):
     assert not (memory.MEMORY_DIR / item["id"]).exists()
     assert tc.get(f"/api/memory/{item['id']}/image").status_code == 404
     assert tc.delete(f"/api/memory/{item['id']}").status_code == 404
+
+
+def test_the_model_decides_any_wording(tc, iacore):
+    """Catches: every new wording missed by patterns ("no te olvides que…"), and then the model
+    claiming it had kept it (2026-10-28)."""
+    _robot(tc)
+    KEEP["says"] = {"decided": True, "keep": "note", "note": "mañana hay reunión"}
+    r = tc.post("/api/vlm/stream", json={"prompt": "No te olvides que mañana hay reunión", "robot": "g1"})
+    assert r.text == "Listo, me lo acuerdo: mañana hay reunión."
+    KEEP["says"] = {"decided": True, "keep": None, "note": ""}
+    tc.post("/api/vlm/stream", json={"prompt": "Acordate que es mentira", "robot": "g1"})
+    assert iacore and iacore[-1]["prompt"] == "Acordate que es mentira", "the model said no: the assistant answers"
+
+
+def test_a_question_is_not_even_asked(tc, iacore):
+    _robot(tc)
+    tc.post("/api/vlm/stream", json={"prompt": "¿Qué te pedí que recuerdes?", "robot": "g1"})
+    assert KEEP["asked"] == [] and iacore[-1]["prompt"] == "¿Qué te pedí que recuerdes?"
