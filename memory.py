@@ -38,16 +38,28 @@ NOTE_CHARS = 500
 # What goes to the assistant with each question: the newest notes that fit.
 NOTES_TO_ASSISTANT_CHARS = 1500
 
-# The two requests, matched on the plain text (lower case, no accents), at the start: "qué
-# imagen guardaste?" is a question about the memory, not a request to keep one. Command
-# words, in both languages — no topic words.
+# The two requests, matched on the plain text (lower case, no accents), at the start. By the
+# verb's STEM, so any form Whisper writes counts: "Sacad una foto a esto" (it heard the
+# vosotros form) was not taken for a request, and the model then claimed it had saved the
+# picture (2026-10-28). A question is not a request ("¿guardaste la foto?", "¿qué imagen
+# guardaste?") unless it is a polite one ("¿podés guardar esta foto?"). Command words, in both
+# languages — no topic words.
 _NAMES = r"(?:(?:bender|huesos|robot)\W+)?(?:(?:por favor|please)\W+)?"
+_POLITE = r"(?:(?:me |nos )?(?:podes|podrias|puedes|podria|can you|could you|would you|will you)\W+)?"
+_PICTURE = r"\b(?:imagen\w*|foto\w*|captura|picture|photo\w*|image|snapshot|screenshot|pic)\b"
+# "Guardá" or "save" + what it points at ("esto", "este control") is a picture too: Whisper made
+# "guardá una foto de este control" into "Lo guardamos por todo este control" (2026-10-28).
+# "Sacá" / "tomá" need the picture word: "sacá la mano" keeps nothing.
+_POINTED = r"\b(?:esto|este|esta|eso|ese|esa|aca|ahi|this|that|it)\b"
 SAVE_IMAGE = re.compile(
-    r"^\W*" + _NAMES + r"(?:guarda(?:me|la)?|saca(?:me|le)?|toma(?:le)?|save|take|store|keep|snap)\b"
-    r"[^?]*?\b(?:imagen|foto|fotito|captura|picture|photo|image|snapshot|screenshot|pic)\b")
+    r"^\W*" + _NAMES + _POLITE + r"(?:(?:lo|la|los|las|me lo|me la)\W+)?"
+    r"(?:(?:guard|sac|tom|save|take|store|keep|snap)\w*\b[^?]*?" + _PICTURE
+    + r"|(?:guard|save|store|keep)\w*\b[^?]*?" + _POINTED + r"|(?:fotografi|captur)\w*\b)")
 REMEMBER = re.compile(
-    r"^\W*" + _NAMES + r"(?:acordate|acuerdate|recorda(?:te)?|recuerda|anota(?:te)?|guarda en (?:tu )?memoria|"
+    r"^\W*" + _NAMES + _POLITE + r"(?:(?:acord|acuerd|record|recuerd|anot)\w*|guarda\w* en (?:tu )?memoria|"
     r"remember|note|keep in mind)\W+(?:de )?(?:que|that)\W+")
+_ASKS_POLITELY = re.compile(r"^\W*" + _NAMES + r"(?:me |nos )?(?:podes|podrias|puedes|podria|can you|"
+                            r"could you|would you|will you)\b")
 
 
 def _plain(text: str) -> str:
@@ -59,10 +71,12 @@ def command(prompt: str) -> tuple[str, str] | None:
     """("image", "") or ("note", what to keep) when `prompt` asks to keep something."""
     text = unicodedata.normalize("NFC", (prompt or "").strip())
     plain = _plain(text)
+    if "?" in plain and not _ASKS_POLITELY.match(plain):
+        return None
     if m := REMEMBER.match(plain):
         # Same length as the original (one letter per accented letter), so the note keeps
         # the original's capitals and accents.
-        note = (text[m.end():] if len(plain) == len(text) else plain[m.end():]).strip(" .")
+        note = (text[m.end():] if len(plain) == len(text) else plain[m.end():]).strip(" .?")
         return ("note", note[:NOTE_CHARS]) if note else None
     if SAVE_IMAGE.match(plain):
         return ("image", "")
