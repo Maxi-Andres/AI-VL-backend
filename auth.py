@@ -117,6 +117,8 @@ POLICY: dict[tuple[str, str], str] = {
     ("GET", "/api/robot-net"): "view",
     ("GET", "/api/robot-transport"): "view",
     ("GET", "/api/robot-video"): "view",
+    ("POST", "/api/whep/{robot}"): "view",              # the H.264 drive view's WebRTC offer
+    ("DELETE", "/api/whep/{robot}/{session}"): "view",
     ("GET", "/api/robot-frame"): "view",
     ("GET", "/api/robot-camera/status"): "view",
     ("GET", "/api/robot-audio/volume"): "view",

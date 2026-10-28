@@ -35,6 +35,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 
@@ -61,6 +62,13 @@ EXECUTOR_URL = os.environ.get("EXECUTOR_URL", "http://localhost:8090").rstrip("/
 # The robot camera bridge control (start/stop the robot-camera stream). Usually the
 # unitree_ros2 devcontainer on this host (host-networked -> localhost).
 CAMERA_CONTROL_URL = os.environ.get("CAMERA_CONTROL_URL", "http://localhost:8091").rstrip("/")
+# mediamtx's WebRTC server, for the H.264 drive view (POST /api/whep/{robot}). On this host;
+# its certificate is self-signed, which is fine on loopback.
+# Frigate, the NVR: it reads EVERY robot's camera at once (the camera bridge streams only the
+# robot picked), so the Fleet's thumbnails come from it, one per robot.
+FRIGATE_URL = os.environ.get("FRIGATE_URL", "http://127.0.0.1:5000").rstrip("/")
+FRIGATE_CAMERAS = {"go2": "go2", "g1": "g1"}   # robot slot -> Frigate camera name
+MEDIAMTX_WEBRTC_URL = os.environ.get("MEDIAMTX_WEBRTC_URL", "https://127.0.0.1:8889").rstrip("/")
 CORS_ORIGINS = [o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",") if o.strip()]
 FRONTEND_DIST = os.environ.get("FRONTEND_DIST", "").strip()
 
@@ -474,6 +482,60 @@ async def set_robot_transport(req: RobotTransportConfig):
             {"ok": False, "error": f"robot executor unreachable: {e}"}, status_code=502)
 
 
+# The H.264/WebRTC drive view, negotiated through here instead of with mediamtx directly.
+# The browser used to POST its offer to mediamtx's own origin (:8889), whose self-signed
+# certificate it refused with no prompt until someone opened that address once and accepted
+# it, per browser ("Open this once and accept the certificate"); from the internet :8889 is
+# not reachable at all, and mediamtx answers anyone who can. Here the offer rides Pilot's
+# origin and certificate, behind its sign-in. Only the signalling: the video itself still
+# flows mediamtx -> browser over ICE, so outside the office it needs mediamtx to announce an
+# address reachable from there (docs/PUBLIC_ACCESS.md).
+WHEP_PATHS = {"go2": "robot", "g1": "g1"}     # the mediamtx path of each robot's camera
+_WHEP_SESSION = re.compile(r"[A-Za-z0-9-]{1,64}")
+
+
+def _whep_client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(verify=False, timeout=httpx.Timeout(connect=3.0, read=10.0, write=5.0, pool=3.0))  # noqa: S501 - loopback, mediamtx's own self-signed certificate
+
+
+@app.post("/api/whep/{robot}")
+async def whep_offer(robot: str, request: Request):
+    path = WHEP_PATHS.get(robot)
+    if path is None:
+        return JSONResponse({"error": f"unknown robot {robot!r}"}, status_code=404)
+    offer = await request.body()
+    if not offer or len(offer) > 64_000:
+        return JSONResponse({"error": "expected an SDP offer"}, status_code=400)
+    try:
+        async with _whep_client() as mc:
+            r = await mc.post(f"{MEDIAMTX_WEBRTC_URL}/{path}/whep", content=offer,
+                              headers={"Content-Type": "application/sdp"})
+    except httpx.HTTPError as e:
+        logger.warning("mediamtx unreachable: %s", e)
+        return JSONResponse({"error": "video server unreachable"}, status_code=502)
+    if r.status_code != 201:
+        # 404 when the robot is not publishing: say so, the page falls back on its own.
+        return Response(status_code=r.status_code if r.status_code < 500 else 502)
+    headers = {}
+    session = r.headers.get("location", "").rstrip("/").rsplit("/", 1)[-1]
+    if _WHEP_SESSION.fullmatch(session):
+        headers["Location"] = f"/api/whep/{robot}/{session}"
+    return Response(r.content, status_code=201, media_type="application/sdp", headers=headers)
+
+
+@app.delete("/api/whep/{robot}/{session}")
+async def whep_close(robot: str, session: str):
+    path = WHEP_PATHS.get(robot)
+    if path is None or not _WHEP_SESSION.fullmatch(session):
+        return Response(status_code=404)
+    try:
+        async with _whep_client() as mc:
+            r = await mc.delete(f"{MEDIAMTX_WEBRTC_URL}/{path}/whep/{session}")
+    except httpx.HTTPError:
+        return Response(status_code=502)
+    return Response(status_code=r.status_code if r.status_code < 500 else 502)
+
+
 @app.get("/api/robot-video")
 async def robot_video(robot: str = "go2"):
     """The robot's LIVE video knobs: what is running, what is saved, and the valid ranges.
@@ -549,11 +611,51 @@ async def robot_camera(action: str):
             {"ok": False, "error": f"camera bridge unreachable: {e}"}, status_code=502)
 
 
+_frigate_cache: "tuple[float, dict[str, bool] | None]" = (0.0, None)
+
+
+def _frigate_client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(timeout=_PROBE_TIMEOUT)
+
+
+async def _frigate_live() -> "dict[str, bool] | None":
+    """Which robots' cameras Frigate is receiving now (its capture rate above zero); None when
+    Frigate does not answer. Cached briefly: every thumbnail and every presence round asks."""
+    global _frigate_cache
+    at, cached = _frigate_cache
+    if time.monotonic() - at < PRESENCE_TTL:
+        return cached
+    stats = await _probe_json(f"{FRIGATE_URL}/api/stats")
+    cams = (stats or {}).get("cameras")
+    live = None if not isinstance(cams, dict) else {
+        slot: (cams.get(name) or {}).get("camera_fps", 0) > 0 for slot, name in FRIGATE_CAMERAS.items()}
+    _frigate_cache = (time.monotonic(), live)
+    return live
+
+
 @app.get("/api/robot-frame")
-async def robot_frame():
+async def robot_frame(robot: str = ""):
     """The newest frame from the robot's camera, as JPEG — what the robot "sees" when the voice
     assistant is asked something from a page that shows no video. 503 when the camera bridge
-    sent nothing in the last ROBOT_CAM_LIVE_WINDOW seconds: an old frame would be a lie."""
+    sent nothing in the last ROBOT_CAM_LIVE_WINDOW seconds: an old frame would be a lie.
+
+    With `robot`, that robot's camera as Frigate sees it, small (a Fleet thumbnail): the bridge
+    carries only the robot picked, so the other one never had a picture there. 503 the same
+    way when Frigate is not receiving it — Frigate keeps showing the last frame it got."""
+    if robot:
+        name = FRIGATE_CAMERAS.get(robot)
+        if name is None:
+            return JSONResponse({"error": f"unknown robot {robot!r}"}, status_code=404)
+        if not ((await _frigate_live()) or {}).get(robot):
+            return JSONResponse({"error": "no live frame from this robot's camera"}, status_code=503)
+        try:
+            async with _frigate_client() as fc:
+                r = await fc.get(f"{FRIGATE_URL}/api/{name}/latest.jpg", params={"h": 240})
+        except httpx.HTTPError:
+            return JSONResponse({"error": "the video recorder does not answer"}, status_code=502)
+        if r.status_code != 200:
+            return JSONResponse({"error": "no frame from the video recorder"}, status_code=502)
+        return Response(content=r.content, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
     if not robot_cam.last_jpeg or not robot_cam.snapshot()["live"]:
         return JSONResponse({"error": "no live frame from the robot's camera"}, status_code=503)
     return Response(content=robot_cam.last_jpeg, media_type="image/jpeg",
@@ -1607,10 +1709,11 @@ async def presence():
         if cached and now - ts < PRESENCE_TTL:
             return cached
 
-        bridge, executor, iacore = await asyncio.gather(
+        bridge, executor, iacore, cameras = await asyncio.gather(
             _probe_json(f"{CAMERA_CONTROL_URL}/status"),
             _probe_json(f"{EXECUTOR_URL}/health"),
             _probe_iacore(),
+            _frigate_live(),
         )
         b, e = bridge or {}, executor or {}
         data = {
@@ -1641,6 +1744,9 @@ async def presence():
                 # iacore cannot tell (down or older).
                 "gpus": (iacore or {}).get("gpus"),
             },
+            # Each robot's camera reaching the recorder (Frigate) — every robot at once, unlike
+            # robot_cam, which is the one robot the bridge streams. None: Frigate is down.
+            "cameras": cameras,
         }
         _presence_cache = (now, data)
         return data
