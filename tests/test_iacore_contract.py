@@ -50,7 +50,8 @@ import pytest
 CONTRACT = {
     "VlmRequest": ["image", "model", "scope", "variant", "max_tokens", "num_ctx", "think",
                    "prompt", "robot"],
-    "VlmStreamRequest": ["image", "prompt", "model", "max_tokens", "num_ctx", "robot", "history"],
+    "VlmStreamRequest": ["image", "prompt", "model", "max_tokens", "num_ctx", "robot", "history",
+                         "robot_state"],
     "SpeakRequest": ["text", "voice"],
     "CommandRequest": ["text", "image", "model", "robot", "num_ctx", "max_tokens"],
 }

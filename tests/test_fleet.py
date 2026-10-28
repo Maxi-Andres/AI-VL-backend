@@ -159,3 +159,30 @@ def test_robots_get_a_colour_and_can_change_it(owner):
     assert owner.patch(f"/api/robots/{r['id']}", json={"color": "rose"}).json()["color"] == "rose"
     assert owner.patch(f"/api/robots/{r['id']}", json={"color": "#ff0000"}).status_code == 422
     owner.delete(f"/api/robots/{r['id']}")
+
+
+def test_the_assistant_hears_the_robot_s_own_state(owner):
+    """"¿Cuánta batería tenés?": what robot_watch measured for this company's robot in the slot,
+    the live reading (pack temperature, how old) while it is fresh."""
+    import time
+
+    from sqlalchemy import select
+
+    owner.post("/api/robots", json={"name": "Bender", "slot": "g1"})   # 409 if it is there
+
+    async def table_battery(slot, pct):
+        async with db.SessionLocal() as s:
+            robot = (await s.execute(select(db.Robot).where(db.Robot.slot == slot))).scalars().first()
+            robot.battery_pct, robot.battery_charging, robot.battery_at = pct, False, db.utcnow()
+            await s.commit()
+            return robot.org_id
+
+    org = owner.portal.call(table_battery, "g1", 66.0)
+    table = owner.portal.call(robot_watch.state, org, "g1")
+    assert table["name"] and table["battery"] == {"percent": 66.0, "age_s": 0, "charging": False}
+    robot_watch._battery["g1"] = (time.monotonic(), {"percent": 54, "charging": True,
+                                                     "temp_c": 31, "age_s": 2})
+    live = owner.portal.call(robot_watch.state, org, "g1")
+    robot_watch._battery.clear()
+    assert live["battery"] == {"percent": 54, "charging": True, "temp_c": 31, "age_s": 2}
+    assert owner.portal.call(robot_watch.state, "another-company", "g1") is None

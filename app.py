@@ -214,6 +214,8 @@ class VlmStreamRequest(BaseModel):
     robot: str | None = None        # whose identity answers (iacore persona_for)
     # The conversation so far, oldest first; iacore sends the newest turns that fit along.
     history: list[ChatTurn] = Field(default_factory=list, max_length=50)
+    # Filled HERE, never by the browser: what the robot knows about itself (robot_watch.state).
+    robot_state: dict | None = Field(default=None, exclude=True)
 
 
 class SpeakRequest(BaseModel):
@@ -349,16 +351,23 @@ async def vlm(req: VlmRequest):
 
 
 @app.post("/api/vlm/stream")
-async def vlm_stream(req: VlmStreamRequest):
+async def vlm_stream(req: VlmStreamRequest, request: Request):
     """Stream the free-prompt answer through to the browser as it is generated, so
     the UI can show it live and speak it sentence by sentence. Relays iacore's
-    text chunks unchanged; still no model deps here."""
+    text chunks unchanged; still no model deps here.
+
+    The robot's own state (battery, link) goes along, from this company's robot in that slot:
+    iacore says it only when the question asks ("¿cuánta batería tenés?")."""
+    body = req.model_dump(exclude_none=True)
+    principal = request.scope.get("principal")
+    if req.robot and principal is not None:
+        state = await robot_watch.state(principal.org_id, req.robot)
+        if state:
+            body["robot_state"] = state
 
     async def gen():
         try:
-            async with client.stream(
-                "POST", "/vlm/stream", json=req.model_dump(exclude_none=True)
-            ) as r:
+            async with client.stream("POST", "/vlm/stream", json=body) as r:
                 async for chunk in r.aiter_bytes():
                     yield chunk
         except Exception as e:

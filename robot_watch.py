@@ -22,6 +22,7 @@ import contextlib
 import logging
 import os
 import re
+import time
 from datetime import datetime
 
 import httpx
@@ -38,6 +39,10 @@ FLIP_AFTER = 2
 _RTT = re.compile(rb"time[=<]([0-9.]+) ?ms")
 # slot -> (the state seen last, how many samples in a row it has held)
 _streak: dict[str, tuple[bool, int]] = {}
+# The newest battery reading per slot, whole (charge, charging, pack temperature, volts, cycles,
+# its age), kept in memory between ticks: the table keeps only charge and charging, and the
+# assistant answering "¿cuánta batería tenés?" should not cost a call on the control path.
+_battery: dict[str, tuple[float, dict]] = {}
 
 
 async def ping_rtt(ip: str, timeout: float = 1.5) -> float | None:  # noqa: ASYNC109  # bounded with asyncio.wait_for below
@@ -102,6 +107,7 @@ async def record(transports: dict[str, dict], now: datetime | None = None) -> No
                     robot.last_seen_at, robot.latency_ms = now, rtt
                 robot.link = str(t.get("mode") or "")[:16] or None
                 if (b := _fresh_battery(t)) is not None:
+                    _battery[slot] = (time.monotonic(), b)
                     robot.battery_pct = float(b["percent"])
                     robot.battery_charging = b.get("charging") if isinstance(b.get("charging"), bool) else None
                     robot.battery_at = now
@@ -110,6 +116,40 @@ async def record(transports: dict[str, dict], now: datetime | None = None) -> No
         await s.commit()
     for org_id, name, action in changes:
         await auth.audit(None, action, target=name, org_id=org_id)
+
+
+async def state(org_id: str, slot: str) -> dict | None:
+    """What the robot in `slot` of this organization knows about itself, for the assistant to
+    answer "¿cuánta batería tenés?" or "¿tenés señal?": None when the company has no such
+    robot. Ages in seconds; a value never measured is left out rather than guessed."""
+    async with db.SessionLocal() as s:
+        robot = (await s.execute(select(db.Robot).where(db.Robot.org_id == org_id,
+                                                        db.Robot.slot == slot))).scalars().first()
+    if robot is None:
+        return None
+    now = db.utcnow()
+
+    def age(t: datetime | None) -> int | None:
+        return None if t is None else max(0, int((now - t).total_seconds()))
+
+    out: dict = {"name": robot.name}
+    if robot.online is not None:
+        out.update(online=robot.online, status_since_s=age(robot.status_since))
+    if robot.latency_ms is not None:
+        out["latency_ms"] = round(robot.latency_ms)
+    if robot.link:
+        out["link"] = robot.link
+    live = _battery.get(slot)
+    if live and time.monotonic() - live[0] < 3 * max(WATCH_EVERY, 1):
+        b = live[1]
+        out["battery"] = {k: b[k] for k in ("percent", "charging", "temp_c", "volts", "cycles")
+                          if b.get(k) is not None}
+        out["battery"]["age_s"] = int(time.monotonic() - live[0] + (b.get("age_s") or 0))
+    elif robot.battery_pct is not None:
+        out["battery"] = {"percent": robot.battery_pct, "age_s": age(robot.battery_at)}
+        if robot.battery_charging is not None:
+            out["battery"]["charging"] = robot.battery_charging
+    return out
 
 
 async def _tick(ec: httpx.AsyncClient, executor_url: str) -> None:

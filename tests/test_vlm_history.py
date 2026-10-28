@@ -54,3 +54,31 @@ def test_an_oversized_conversation_is_refused(iacore):
     turns = [{"question": "q", "answer": "a"}] * 51
     assert tc.post("/api/vlm/stream", json={"prompt": "x", "history": turns}).status_code == 422
     assert got == []
+
+
+def test_the_robot_s_own_state_goes_along(iacore, monkeypatch):
+    """Catches: "¿cuánta batería tenés?" answered without knowing — the state is this company's
+    robot in that slot, read by robot_watch."""
+    tc, got = iacore
+    asked = []
+
+    async def state(org_id, slot):
+        asked.append((org_id, slot))
+        return {"name": "Huesos", "battery": {"percent": 82, "charging": False}}
+
+    monkeypatch.setattr(gateway.robot_watch, "state", state)
+    tc.post("/api/vlm/stream", json={"image": "aGk=", "prompt": "¿Cuánta batería tenés?", "robot": "go2"})
+    assert asked == [("test", "go2")]
+    assert got[0]["robot_state"]["battery"]["percent"] == 82
+
+
+def test_the_browser_cannot_make_up_the_robot_s_state(iacore, monkeypatch):
+    tc, got = iacore
+
+    async def none(org_id, slot):
+        return None
+
+    monkeypatch.setattr(gateway.robot_watch, "state", none)
+    tc.post("/api/vlm/stream", json={"prompt": "q", "robot": "go2",
+                                     "robot_state": {"battery": {"percent": 100}}})
+    assert "robot_state" not in got[0]
