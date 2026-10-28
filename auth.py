@@ -120,6 +120,7 @@ POLICY: dict[tuple[str, str], str] = {
     ("POST", "/api/whep/{robot}"): "view",              # the H.264 drive view's WebRTC offer
     ("DELETE", "/api/whep/{robot}/{session}"): "view",
     ("GET", "/api/robot-frame"): "view",
+    ("GET", "/api/robot-mjpeg"): "view",          # a robot's live camera, for the Splunk boards
     ("GET", "/api/robot-camera/status"): "view",
     ("GET", "/api/robot-audio/volume"): "view",
     ("GET", "/api/tts/voices"): "view",

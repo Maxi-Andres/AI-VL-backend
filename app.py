@@ -662,6 +662,48 @@ async def robot_frame(robot: str = ""):
                     headers={"Cache-Control": "no-store"})
 
 
+# A robot's camera as a live MJPEG stream, from Frigate: what the Splunk dashboards show in an
+# <img>. They used to point the browser at Frigate itself (http://192.168.20.99:5000), which an
+# https page may not load and the internet cannot reach; through Pilot it is https, signed in
+# (the session cookie rides along: splunk. and pilot. are the same site) and works from
+# anywhere. The rate and size are capped: each viewer is one stream out of the office.
+MJPEG_HEIGHTS = (240, 360, 480, 720)
+MJPEG_MAX_FPS = 10
+
+
+@app.get("/api/robot-mjpeg")
+async def robot_mjpeg(robot: str, h: int = 480, fps: int = 5):
+    name = FRIGATE_CAMERAS.get(robot)
+    if name is None:
+        return JSONResponse({"error": f"unknown robot {robot!r}"}, status_code=404)
+    h = min(MJPEG_HEIGHTS, key=lambda x: abs(x - h))
+    fps = max(1, min(MJPEG_MAX_FPS, fps))
+    fc = httpx.AsyncClient(timeout=httpx.Timeout(connect=3.0, read=15.0, write=5.0, pool=3.0))
+    try:
+        upstream = await fc.send(fc.build_request("GET", f"{FRIGATE_URL}/api/{name}",
+                                                  params={"fps": fps, "h": h}), stream=True)
+    except httpx.HTTPError:
+        await fc.aclose()
+        return JSONResponse({"error": "the video recorder does not answer"}, status_code=502)
+    if upstream.status_code != 200:
+        await upstream.aclose()
+        await fc.aclose()
+        return JSONResponse({"error": "no stream from the video recorder"}, status_code=502)
+
+    async def relay():
+        try:
+            async for chunk in upstream.aiter_raw():
+                yield chunk
+        except httpx.HTTPError:
+            pass                    # the recorder went away: end the stream, the page shows it
+        finally:
+            await upstream.aclose()
+            await fc.aclose()
+
+    return StreamingResponse(relay(), media_type=upstream.headers.get("content-type", "multipart/x-mixed-replace"),
+                             headers={"Cache-Control": "no-store"})
+
+
 @app.get("/api/robot-camera/status")
 async def robot_camera_status():
     try:

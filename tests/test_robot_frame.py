@@ -75,3 +75,23 @@ def test_a_robot_frigate_does_not_receive_is_a_503(tc, frigate):
     assert tc.get("/api/robot-frame", params={"robot": "g1"}).status_code == 503
     assert tc.get("/api/robot-frame", params={"robot": "b2"}).status_code == 404
     assert asked == []
+
+
+def test_the_live_stream_comes_from_the_robots_recorder_camera_capped(tc, monkeypatch):
+    """Catches: the Splunk boards' camera needing Frigate's own http address, and a viewer
+    asking the recorder for an unbounded stream."""
+    asked = []
+
+    def handle(req):
+        asked.append(req.url)
+        return gateway.httpx.Response(200, stream=gateway.httpx.ByteStream(b"--frame\r\n" + JPEG),
+                                      headers={"Content-Type": "multipart/x-mixed-replace; boundary=frame"})
+
+    real = gateway.httpx.AsyncClient
+    monkeypatch.setattr(gateway.httpx, "AsyncClient",
+                        lambda **kw: real(transport=gateway.httpx.MockTransport(handle)))
+    r = tc.get("/api/robot-mjpeg", params={"robot": "g1", "h": 5000, "fps": 99})
+    assert r.status_code == 200 and r.headers["content-type"].startswith("multipart/x-mixed-replace")
+    assert r.content.endswith(JPEG)
+    assert asked[0].path == "/api/g1" and asked[0].params["h"] == "720" and asked[0].params["fps"] == "10"
+    assert tc.get("/api/robot-mjpeg", params={"robot": "b2"}).status_code == 404
