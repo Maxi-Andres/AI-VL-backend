@@ -318,6 +318,29 @@ class ChatMessage(Base):
     robot: Mapped[str] = mapped_column(String(16), default="")
 
 
+class Memory(Base):
+    """Something a robot was asked to keep: a picture of what it saw ("guardá esta imagen") or a
+    note ("acordate que la llave está en el cajón"). It belongs to the robot, so the whole team
+    sees it on the Memory page, and deleting the robot deletes it (cascade). A picture is a
+    file in PILOT_DATA_DIR/memory/, named by this id (memory.py)."""
+
+    __tablename__ = "memories"
+    __table_args__ = (Index("ix_memories_robot_at", "robot_id", "created_at"),)
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    org_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("organizations.id", ondelete="CASCADE"), index=True
+    )
+    robot_id: Mapped[str] = mapped_column(String(32), ForeignKey("robots.id", ondelete="CASCADE"))
+    kind: Mapped[str] = mapped_column(String(8))          # "image" | "note"
+    text: Mapped[str] = mapped_column(String(500), default="")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    # Who asked for it: kept by name too, so it still says who after they leave the team.
+    created_by: Mapped[str | None] = mapped_column(
+        String(32), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_by_name: Mapped[str] = mapped_column(String(120), default="")
+
+
 class AuditEvent(Base):
     """Who did what, when, from where. Append-only by convention: nothing updates or
     deletes these rows."""

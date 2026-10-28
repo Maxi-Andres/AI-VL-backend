@@ -34,6 +34,7 @@ from sqlalchemy import func, or_, select, update
 import auth
 import backup
 import db
+import memory
 
 ROBOT_SLOTS = {"go2": "Unitree Go2", "g1": "Unitree G1"}
 PLAN_DIR = db.DATA_DIR / "site-plans"
@@ -334,6 +335,7 @@ async def delete_robot(robot_id: str, conn: HTTPConnection):
         robot = await s.get(db.Robot, robot_id)
         if robot is None or robot.org_id != me.org_id:
             raise HTTPException(404, "No such robot.")
+        await memory.forget_robot(robot.id)     # its pictures; the rows go by cascade
         await s.delete(robot)
         await s.commit()
     await auth.audit(conn, "fleet.robot_removed", me, target=robot.name)

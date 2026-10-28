@@ -50,6 +50,7 @@ import auth
 import backup
 import chats
 import fleet
+import memory
 import robot_watch
 import sso
 import team
@@ -126,6 +127,7 @@ app.include_router(team.router)
 app.include_router(sso.router)
 app.include_router(fleet.router)
 app.include_router(chats.router)
+app.include_router(memory.router)
 # Credentials (the session cookie) only for origins named explicitly — never with "*". The
 # deploy is same-origin and needs no CORS at all; this is for the vite dev server on :5173,
 # which calls :8000 directly: run the gateway with CORS_ORIGINS=http://localhost:5173.
@@ -214,8 +216,10 @@ class VlmStreamRequest(BaseModel):
     robot: str | None = None        # whose identity answers (iacore persona_for)
     # The conversation so far, oldest first; iacore sends the newest turns that fit along.
     history: list[ChatTurn] = Field(default_factory=list, max_length=50)
-    # Filled HERE, never by the browser: what the robot knows about itself (robot_watch.state).
+    # Filled HERE, never by the browser: what the robot knows about itself (robot_watch.state)
+    # and what it was asked to remember (memory.notes).
     robot_state: dict | None = Field(default=None, exclude=True)
+    robot_notes: list[str] | None = Field(default=None, exclude=True)
 
 
 class SpeakRequest(BaseModel):
@@ -357,13 +361,20 @@ async def vlm_stream(req: VlmStreamRequest, request: Request):
     text chunks unchanged; still no model deps here.
 
     The robot's own state (battery, link) goes along, from this company's robot in that slot:
-    iacore says it only when the question asks ("¿cuánta batería tenés?")."""
-    body = req.model_dump(exclude_none=True)
+    iacore says it only when the question asks ("¿cuánta batería tenés?"). So do the notes it
+    was asked to keep (memory.py). "Guardá esta imagen" / "acordate que…" are done here, with
+    no model: the answer says it was kept."""
     principal = request.scope.get("principal")
+    if principal is not None and (cmd := memory.command(req.prompt)):
+        said = await memory.handle(request, req.robot, cmd, req.image, req.prompt)
+        return StreamingResponse(iter([said.encode()]), media_type="text/plain; charset=utf-8")
+    body = req.model_dump(exclude_none=True)
     if req.robot and principal is not None:
         state = await robot_watch.state(principal.org_id, req.robot)
         if state:
             body["robot_state"] = state
+        if notes := await memory.notes(principal.org_id, req.robot):
+            body["robot_notes"] = notes
 
     async def gen():
         try:

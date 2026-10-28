@@ -139,6 +139,11 @@ POLICY: dict[tuple[str, str], str] = {
     ("PATCH", "/api/chats/{chat_id}"): "analyze",
     ("DELETE", "/api/chats/{chat_id}"): "analyze",
     ("POST", "/api/vlm/stream"): "analyze",
+    # Each robot's memory (memory.py): the team sees it, operators keep and delete.
+    ("GET", "/api/memory"): "view",
+    ("GET", "/api/memory/{memory_id}/image"): "view",
+    ("POST", "/api/memory"): "analyze",
+    ("DELETE", "/api/memory/{memory_id}"): "analyze",
     ("POST", "/api/detect"): "analyze",
     ("POST", "/api/transcribe"): "analyze",
     ("POST", "/api/speak"): "analyze",
