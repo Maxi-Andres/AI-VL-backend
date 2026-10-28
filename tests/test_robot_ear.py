@@ -132,12 +132,12 @@ def test_the_pages_mute_goes_on_to_the_ear(tc, executor, ear):
     """Catches: the robot answering its own voice — the page mutes the ear while it speaks."""
     with tc.websocket_connect("/ws/robot-ear?robot=g1") as ws:
         recv(ws)
-        ws.send_text(json.dumps({"type": "mute", "on": True}))
+        ws.send_text(json.dumps({"type": "mute", "on": True, "barge": True}))
         ws.send_text("not json")
         deadline = time.time() + 3
         while not ear.texts and time.time() < deadline:
             time.sleep(0.02)
-    assert ear.texts == [{"type": "mute", "on": True}]
+    assert ear.texts == [{"type": "mute", "on": True, "barge": True}]
 
 
 def test_an_executor_refusal_is_explained(tc, executor, ear):

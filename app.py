@@ -1438,8 +1438,8 @@ async def ws_joints(ws: WebSocket, robot: str = "g1"):
 #
 # The page's "robot mic" switch IS this socket: opening it opens the robot's microphone (the
 # relay turns mic mode on for an open stream) and closing it closes it, at once. The page's
-# {"type": "mute", "on": bool} goes on to iacore, so the ear is deaf while the robot speaks and
-# never answers its own voice. The socket's last message is {"type": "error", "error": why}.
+# {"type": "mute", "on": bool, "barge": bool} goes on to iacore, so the ear is deaf while the
+# robot speaks and never answers its own voice — but for its name, with "barge", to interrupt. The socket's last message is {"type": "error", "error": why}.
 # Audio only flows here and to iacore; the browser gets text.
 # --------------------------------------------------------------------------- #
 EAR_TIMEOUT = httpx.Timeout(connect=3.0, read=10.0, write=5.0, pool=3.0)
@@ -1513,7 +1513,8 @@ async def ws_robot_ear(ws: WebSocket, robot: str = "g1"):
                             continue
                         if isinstance(control, dict) and control.get("type") == "mute":
                             await ear.send(json.dumps({"type": "mute",
-                                                       "on": bool(control.get("on"))}))
+                                                       "on": bool(control.get("on")),
+                                                       "barge": bool(control.get("barge"))}))
                         elif isinstance(control, dict) and control.get("type") == "off":
                             _stop_ears(robot, "the robot's microphone was switched off")
                             return
