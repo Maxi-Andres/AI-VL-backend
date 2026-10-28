@@ -43,7 +43,7 @@ import httpx
 from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from websockets.asyncio.client import connect as ws_connect
 
 import auth
@@ -200,6 +200,11 @@ class VlmRequest(BaseModel):
     robot: str | None = None        # whose identity answers (iacore persona_for)
 
 
+class ChatTurn(BaseModel):
+    question: str = Field("", max_length=4000)
+    answer: str = Field("", max_length=8000)
+
+
 class VlmStreamRequest(BaseModel):
     image: str = ""
     prompt: str = ""
@@ -207,6 +212,8 @@ class VlmStreamRequest(BaseModel):
     max_tokens: int | None = None
     num_ctx: int | None = None
     robot: str | None = None        # whose identity answers (iacore persona_for)
+    # The conversation so far, oldest first; iacore sends the newest turns that fit along.
+    history: list[ChatTurn] = Field(default_factory=list, max_length=50)
 
 
 class SpeakRequest(BaseModel):
