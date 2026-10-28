@@ -226,6 +226,15 @@ def test_links_point_to_the_companys_address(owner):
     assert owner.get("/api/team/address").json()["public_url"] is None
 
 
+def test_only_an_owner_moves_the_address(owner):
+    """Catches: an admin pointing the address at a site of their own. Single sign-on sends
+    everyone there, owners included, so it is an owner's setting like the sign-on itself."""
+    admin = _join(owner, "addr-admin@acme.example", "admin")
+    assert admin.get("/api/team/address").status_code == 200      # admins still see it
+    assert admin.put("/api/team/address", json={"public_url": "https://evil.example"}).status_code == 403
+    assert owner.get("/api/team/address").json()["public_url"] is None
+
+
 def test_removing_a_member_signs_them_out_and_deletes_the_account(owner):
     """Catches: a removed person keeping an open session, their account lingering (and with it
     their password), or the rules of a role change not applying to a removal."""

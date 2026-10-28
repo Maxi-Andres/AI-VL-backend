@@ -279,12 +279,18 @@ async def _exchange(doc: dict, org: db.Organization, code: str, flow: dict) -> d
     return body
 
 
-def _email(claims: dict) -> str | None:
-    # Entra puts the sign-in name in preferred_username and fills `email` only when it is set up
-    # as an optional claim; a provider that says the address is NOT verified is not believed.
+def _email(claims: dict, provider: str) -> str | None:
+    # A provider that says the address is NOT verified is not believed. Microsoft never says
+    # either way: its `email` is the directory's mail attribute, which an admin types freely and
+    # a guest brings from anywhere, so matching on it could hand someone else's Pilot account
+    # over ("nOAuth"). Its sign-in name (preferred_username, the UPN) must sit on a domain the
+    # tenant proved it owns, so for Microsoft that one is used and `email` never is.
     if claims.get("email_verified") is False:
         return None
-    raw = claims.get("email") or claims.get("preferred_username") or claims.get("upn")
+    if provider == "microsoft":
+        raw = claims.get("preferred_username") or claims.get("upn")
+    else:
+        raw = claims.get("email") or claims.get("preferred_username") or claims.get("upn")
     if not isinstance(raw, str) or "@" not in raw:
         return None
     return raw.strip().lower()[:254]
@@ -318,7 +324,7 @@ async def callback(request: Request, code: str | None = None, state: str | None 
         await auth.audit(request, "auth.sso_failed", detail={"reason": f"id_token: {e}"[:200]})
         return _back("token")
 
-    email = _email(claims)
+    email = _email(claims, org.sso_provider or "oidc")
     if not email:
         await auth.audit(request, "auth.sso_failed", detail={"reason": "no verified email"})
         return _back("no_email")

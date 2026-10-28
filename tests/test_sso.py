@@ -268,3 +268,14 @@ def test_with_sso_on_a_password_works_from_inside_only(owner, idp, monkeypatch):
                                             "client_id": CLIENT, "password_anywhere": True})
     assert allow.status_code == 200 and allow.json()["password_anywhere"] is True
     assert _password("200.45.10.3") == 200
+
+
+def test_microsoft_is_matched_on_the_sign_in_name_not_the_mail_attribute():
+    """Catches: an Entra `email` claim (the mail attribute, never verified) taking over the
+    Pilot account whose address it names."""
+    spoof = {"preferred_username": "mallory@acme.example", "email": "ana@acme.example"}
+    assert sso._email(spoof, "microsoft") == "mallory@acme.example"
+    assert sso._email({"email": "ana@acme.example"}, "microsoft") is None
+    assert sso._email({"preferred_username": " Ana@Acme.Example "}, "microsoft") == "ana@acme.example"
+    assert sso._email(spoof, "google") == "ana@acme.example"
+    assert sso._email({"email": "ana@acme.example", "email_verified": False}, "google") is None
