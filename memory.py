@@ -44,7 +44,11 @@ NOTES_TO_ASSISTANT_CHARS = 1500
 # picture (2026-10-28). A question is not a request ("¿guardaste la foto?", "¿qué imagen
 # guardaste?") unless it is a polite one ("¿podés guardar esta foto?"). Command words, in both
 # languages — no topic words.
-_NAMES = r"(?:(?:bender|huesos|robot)\W+)?(?:(?:por favor|please)\W+)?"
+# Up to two words before the request ("Che, acordate que…", "Bueno, sacá una foto"): a stray
+# note now and then is seen and deleted on the Memory page; a missed request is worse — the
+# model then says it was kept, and nobody notices it was not.
+_NAMES = (r"(?:(?!(?:no|nunca|don|do not|never)\b)\w+\W+){0,2}?"
+          r"(?:(?:bender|huesos|robot)\W+)?(?:(?:por favor|please)\W+)?")
 _POLITE = r"(?:(?:me |nos )?(?:podes|podrias|puedes|podria|can you|could you|would you|will you)\W+)?"
 _PICTURE = r"\b(?:imagen\w*|foto\w*|captura|picture|photo\w*|image|snapshot|screenshot|pic)\b"
 # "Guardá" or "save" + what it points at ("esto", "este control") is a picture too: Whisper made
@@ -55,9 +59,11 @@ SAVE_IMAGE = re.compile(
     r"^\W*" + _NAMES + _POLITE + r"(?:(?:lo|la|los|las|me lo|me la)\W+)?"
     r"(?:(?:guard|sac|tom|save|take|store|keep|snap)\w*\b[^?]*?" + _PICTURE
     + r"|(?:guard|save|store|keep)\w*\b[^?]*?" + _POINTED + r"|(?:fotografi|captur)\w*\b)")
+# "A notar que…" is Whisper's "anotá que…" in two words (2026-10-28).
 REMEMBER = re.compile(
-    r"^\W*" + _NAMES + _POLITE + r"(?:(?:acord|acuerd|record|recuerd|anot)\w*|guarda\w* en (?:tu )?memoria|"
-    r"remember|note|keep in mind)\W+(?:de )?(?:que|that)\W+")
+    r"^\W*" + _NAMES + _POLITE + r"(?:(?:acord|acuerd|record|recuerd|anot|a not)\w*|"
+    r"guarda\w* en (?:tu )?memoria|toma\w* nota|make a note|remember|note|keep in mind)"
+    r"\W+(?:de )?(?:que|that)\W+")
 _ASKS_POLITELY = re.compile(r"^\W*" + _NAMES + r"(?:me |nos )?(?:podes|podrias|puedes|podria|can you|"
                             r"could you|would you|will you)\b")
 

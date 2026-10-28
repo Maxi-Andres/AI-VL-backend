@@ -44,6 +44,12 @@ PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 200
     ("¿Podés guardar esta foto?", "image", ""),
     ("Can you take a picture?", "image", ""),
     ("Lo guardamos por todo este control.", "image", ""),
+    ("A notar que hoy es el cumpleaños de Mateo.", "note", "hoy es el cumpleaños de Mateo"),
+    ("Tomá nota de que el lunes no hay oficina", "note", "el lunes no hay oficina"),
+    ("Make a note that the printer needs toner", "note", "the printer needs toner"),
+    ("Che, acordate que el martes viene Mateo", "note", "el martes viene Mateo"),
+    ("Bueno Bender, sacá una foto", "image", ""),
+    ("Ok, remember that the door code is 1234", "note", "the door code is 1234"),
     ("Guardá esto", "image", ""),
     ("Keep this", "image", ""),
     ("¿Me podés recordar que mañana hay reunión?", "note", "mañana hay reunión"),
@@ -55,6 +61,7 @@ def test_what_asks_to_keep_something(said, kind, note):
 @pytest.mark.parametrize("said", ["¿Qué imagen guardaste?", "¿Qué ves en la foto?", "Bien, anotalo",
                                   "¿Guardaste la foto?", "¿Te acordás de lo que te dije?", "Toma nota",
                                   "Sacá la mano de ahí", "Guardá silencio",
+                                  "No guardes esto", "Don't save this picture", "Never remember that",
                                   "Describe the picture", "¿Te acordás de algo?", "Hola"])
 def test_what_does_not(said):
     assert memory.command(said) is None
