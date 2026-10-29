@@ -24,6 +24,8 @@ def iacore(monkeypatch):
     got = []
 
     def handle(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/keep":          # memory.decide asks first: nothing to keep here
+            return httpx.Response(200, json={"decided": True, "keep": None, "note": ""})
         got.append(json.loads(req.content))
         return httpx.Response(200, content=b"Marron.")
 

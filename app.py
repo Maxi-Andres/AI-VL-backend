@@ -224,6 +224,7 @@ class VlmStreamRequest(BaseModel):
 
 class KeepRequest(BaseModel):
     text: str = Field("", max_length=4000)
+    image: str = ""
 
 
 class SpeakRequest(BaseModel):
@@ -370,8 +371,10 @@ async def vlm_stream(req: VlmStreamRequest, request: Request):
     no model: the answer says it was kept."""
     principal = request.scope.get("principal")
     if principal is not None and (cmd := await memory.decide(
-            req.prompt, lambda text: client.post("/keep", json=KeepRequest(text=text).model_dump(),
-                                                 timeout=3.0))):
+            req.prompt, lambda text: client.post(
+                "/keep", json=KeepRequest(text=text, image=req.image).model_dump(),
+                # ~45 ms to read the words; "acordate de la medida" also reads the frame (~0.3 s)
+                timeout=10.0))):
         said = await memory.handle(request, req.robot, cmd, req.image, req.prompt)
         return StreamingResponse(iter([said.encode()]), media_type="text/plain; charset=utf-8")
     body = req.model_dump(exclude_none=True)

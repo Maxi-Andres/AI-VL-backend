@@ -92,19 +92,25 @@ def command(prompt: str) -> tuple[str, str] | None:
 async def decide(prompt: str, ask_iacore) -> tuple[str, str] | None:
     """What `prompt` asks to keep: the VLM server decides (iacore /keep, any wording, both
     languages — patterns missed every new one Whisper wrote); `command()`'s patterns only when
-    it cannot be asked. A question is never a request unless a polite one — that is grammar,
-    decided here without asking. `ask_iacore(text)` posts to /keep and returns the response."""
+    it cannot be asked. Questions go to the model too: Whisper puts question marks on orders,
+    and "¿Sacá esta foto de esto?" was dropped here as a question (2026-10-28).
+
+    ("image", ""), ("note", fact), ("seen", the fact read off the frame — "acordate de la
+    medida"), ("ask", "") for a request with the fact missing, or None. `ask_iacore(text)` posts
+    to /keep and returns the response."""
     text = unicodedata.normalize("NFC", (prompt or "").strip())
-    plain = _plain(text)
-    if not plain or ("?" in plain and not _ASKS_POLITELY.match(plain)):
+    if not _plain(text):
         return None
     try:
         said = (await ask_iacore(text)).json()
         if said.get("decided"):
-            if said.get("keep") == "picture":
+            kind = said.get("keep")
+            note = str(said.get("note") or "").strip()[:NOTE_CHARS]
+            if kind == "picture":
                 return ("image", "")
-            note = str(said.get("note") or "").strip()
-            return ("note", note[:NOTE_CHARS]) if said.get("keep") == "note" and note else None
+            if kind == "ask":
+                return ("ask", "")
+            return (kind, note) if kind in ("note", "seen") and note else None
     except Exception:  # iacore down or old: the patterns still work
         pass
     return command(text)
@@ -122,11 +128,15 @@ def _spanish(text: str) -> bool:
 def _reply(key: str, spanish: bool, note: str = "") -> str:
     es = {"image": "Listo, guardé la imagen en mi memoria.",
           "note": f"Listo, me lo acuerdo: {note}.",
+          "seen": f"Listo, me lo acuerdo: {note} Guardé también la imagen.",
+          "ask": "¿Qué querés que me acuerde?",
           "no_robot": "No hay un robot elegido donde guardarlo.",
           "no_image": "No tengo una imagen para guardar.",
           "bad_image": "No pude guardar esa imagen."}
     en = {"image": "Done, I saved the picture to my memory.",
           "note": f"Got it, I'll remember: {note}.",
+          "seen": f"Got it, I'll remember: {note} I saved the picture too.",
+          "ask": "What should I remember?",
           "no_robot": "There is no robot selected to keep it.",
           "no_image": "I have no picture to save.",
           "bad_image": "I could not save that picture."}
@@ -173,6 +183,8 @@ async def handle(conn: HTTPConnection, slot: str | None, cmd: tuple[str, str], i
     me: auth.Principal = conn.scope["principal"]
     spanish = _spanish(prompt)
     kind, note = cmd
+    if kind == "ask":
+        return _reply("ask", spanish)
     async with db.SessionLocal() as s:
         robot = await _robot(s, me.org_id, slot) if slot else None
     if robot is None:
@@ -186,19 +198,26 @@ async def handle(conn: HTTPConnection, slot: str | None, cmd: tuple[str, str], i
         await _keep(me, robot, "image", image=raw)
         await auth.audit(conn, "memory.save", target=robot.name, detail={"kind": "image"})
         return _reply("image", spanish)
+    if kind == "seen" and (raw := _image_bytes(image_b64) if image_b64 else None) is not None:
+        # The picture with the fact read off it as its caption: the page shows both, and the
+        # caption goes to the assistant like a note ("¿cuál era la medida?").
+        await _keep(me, robot, "image", text=note, image=raw)
+        await auth.audit(conn, "memory.save", target=robot.name, detail={"kind": "image"})
+        return _reply("seen", spanish, note)
     await _keep(me, robot, "note", text=note)
     await auth.audit(conn, "memory.save", target=robot.name, detail={"kind": "note"})
     return _reply("note", spanish, note)
 
 
 async def notes(org_id: str, slot: str) -> list[str]:
-    """The robot's newest notes that fit NOTES_TO_ASSISTANT_CHARS, oldest first."""
+    """The robot's newest notes — and pictures' captions — that fit NOTES_TO_ASSISTANT_CHARS,
+    oldest first."""
     async with db.SessionLocal() as s:
         robot = await _robot(s, org_id, slot)
         if robot is None:
             return []
         texts = (await s.execute(
-            select(db.Memory.text).where(db.Memory.robot_id == robot.id, db.Memory.kind == "note")
+            select(db.Memory.text).where(db.Memory.robot_id == robot.id, db.Memory.text != "")
             .order_by(db.Memory.created_at.desc()).limit(50))).scalars().all()
     out, used = [], 0
     for text in texts:

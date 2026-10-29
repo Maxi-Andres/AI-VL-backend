@@ -88,10 +88,13 @@ def iacore(tc, monkeypatch):
     got = []
     KEEP.clear()
     KEEP["asked"] = []
+    KEEP["images"] = []
 
     def handle(req: httpx.Request) -> httpx.Response:
         if req.url.path == "/keep":
-            KEEP["asked"].append(json.loads(req.content)["text"])
+            sent = json.loads(req.content)
+            KEEP["asked"].append(sent["text"])
+            KEEP["images"].append(sent.get("image", ""))
             return httpx.Response(200, json=KEEP.get("says", {"decided": False}))
         got.append(json.loads(req.content))
         return httpx.Response(200, content=b"En el cajon.")
@@ -170,7 +173,40 @@ def test_the_model_decides_any_wording(tc, iacore):
     assert iacore and iacore[-1]["prompt"] == "Acordate que es mentira", "the model said no: the assistant answers"
 
 
-def test_a_question_is_not_even_asked(tc, iacore):
+def test_a_question_goes_to_the_model_too(tc, iacore):
+    """Catches: Whisper's question marks on an order — "¿Sacá esta foto de esto?" was dropped
+    here as a question and never kept (2026-10-28)."""
     _robot(tc)
+    KEEP["says"] = {"decided": True, "keep": "picture", "note": ""}
+    r = tc.post("/api/vlm/stream", json={"image": base64.b64encode(JPEG).decode(),
+                                         "prompt": "¿Sacá esta foto de esto?", "robot": "g1"})
+    assert r.text == "Listo, guardé la imagen en mi memoria."
+    KEEP["says"] = {"decided": True, "keep": None, "note": ""}
     tc.post("/api/vlm/stream", json={"prompt": "¿Qué te pedí que recuerdes?", "robot": "g1"})
-    assert KEEP["asked"] == [] and iacore[-1]["prompt"] == "¿Qué te pedí que recuerdes?"
+    assert KEEP["asked"][-1] == "¿Qué te pedí que recuerdes?" and iacore[-1]["prompt"] == "¿Qué te pedí que recuerdes?"
+
+
+def test_what_only_the_picture_has_is_kept_with_it(tc, iacore):
+    """Catches: "acordate de la medida" kept as the note "la medida" — the number was only in
+    the picture, and a later "¿cuál era la medida?" had nothing to answer from (2026-10-28)."""
+    _robot(tc)
+    frame = base64.b64encode(JPEG).decode()
+    KEEP["says"] = {"decided": True, "keep": "seen", "note": "La medida es 14.3 V."}
+    r = tc.post("/api/vlm/stream", json={"image": frame, "prompt": "Acordate de la medida", "robot": "g1"})
+    assert r.text == "Listo, me lo acuerdo: La medida es 14.3 V. Guardé también la imagen."
+    assert KEEP["images"][-1] == frame, "iacore reads the fact off the frame it was said over"
+    newest = tc.get("/api/memory", params={"robot": "g1"}).json()["items"][0]
+    assert (newest["kind"], newest["text"]) == ("image", "La medida es 14.3 V.")
+    KEEP["says"] = {"decided": True, "keep": None, "note": ""}
+    tc.post("/api/vlm/stream", json={"image": frame, "prompt": "¿Cuál era la medida?", "robot": "g1"})
+    assert "La medida es 14.3 V." in iacore[-1]["robot_notes"], "the caption goes to the assistant"
+
+
+def test_a_request_with_the_fact_missing_is_asked_back(tc, iacore):
+    """Catches: "acordate de que yo llevo" (cut off) kept as the note "yo llevo"."""
+    _robot(tc)
+    before = tc.get("/api/memory", params={"robot": "g1"}).json()["total"]
+    KEEP["says"] = {"decided": True, "keep": "ask", "note": ""}
+    assert tc.post("/api/vlm/stream", json={"prompt": "Acordate de que", "robot": "g1"}).text == \
+        "¿Qué querés que me acuerde?"
+    assert tc.get("/api/memory", params={"robot": "g1"}).json()["total"] == before
