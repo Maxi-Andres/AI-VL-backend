@@ -220,11 +220,9 @@ class VlmStreamRequest(BaseModel):
     # and what it was asked to remember (memory.notes).
     robot_state: dict | None = Field(default=None, exclude=True)
     robot_notes: list[str] | None = Field(default=None, exclude=True)
-
-
-class KeepRequest(BaseModel):
-    text: str = Field("", max_length=4000)
-    image: str = ""
+    # Set HERE for a signed-in person: iacore also decides whether the message asks to keep a
+    # picture or a note, beside its other questions to the model, and says it first (KEEP_MARK).
+    keep: bool = Field(default=False, exclude=True)
 
 
 class SpeakRequest(BaseModel):
@@ -375,6 +373,28 @@ async def vlm(req: VlmRequest):
     return await proxy_json(client.post("/vlm", json=req.model_dump(exclude_none=True)))
 
 
+KEEP_MARK = b"\x1ekeep "
+
+
+async def _keep_mark(chunks) -> "tuple[dict | None, bytes]":
+    """iacore's first words on a stream with `keep`: its answer {"decided", "keep", "note"}, and
+    whatever came after it in the same chunks. (None, what came) when the stream does not start
+    with it (an older iacore): memory.decide then falls back on its patterns."""
+    head = b""
+    async for chunk in chunks:
+        head += chunk
+        if not KEEP_MARK.startswith(head[:len(KEEP_MARK)]):
+            return None, head
+        end = head.find(b"\x1e", len(KEEP_MARK))
+        if end >= 0:
+            try:
+                said = json.loads(head[len(KEEP_MARK):end])
+            except ValueError:
+                said = None
+            return said, head[end + 1:]
+    return None, head
+
+
 @app.post("/api/vlm/stream")
 async def vlm_stream(req: VlmStreamRequest, request: Request):
     """Stream the free-prompt answer through to the browser as it is generated, so
@@ -386,14 +406,9 @@ async def vlm_stream(req: VlmStreamRequest, request: Request):
     was asked to keep (memory.py). "Guardá esta imagen" / "acordate que…" are done here, with
     no model: the answer says it was kept."""
     principal = request.scope.get("principal")
-    if principal is not None and (cmd := await memory.decide(
-            req.prompt, lambda text: client.post(
-                "/keep", json=KeepRequest(text=text, image=req.image).model_dump(),
-                # ~45 ms to read the words; "acordate de la medida" also reads the frame (~0.3 s)
-                timeout=10.0))):
-        said = await memory.handle(request, req.robot, cmd, req.image, req.prompt)
-        return StreamingResponse(iter([said.encode()]), media_type="text/plain; charset=utf-8")
     body = req.model_dump(exclude_none=True)
+    if principal is not None:
+        body["keep"] = True
     if req.robot and principal is not None:
         state = await robot_watch.state(principal.org_id, req.robot)
         if state:
@@ -404,7 +419,18 @@ async def vlm_stream(req: VlmStreamRequest, request: Request):
     async def gen():
         try:
             async with client.stream("POST", "/vlm/stream", json=body) as r:
-                async for chunk in r.aiter_bytes():
+                chunks = r.aiter_bytes()
+                if body.get("keep"):
+                    said, rest = await _keep_mark(chunks)
+                    cmd = memory.decide(req.prompt, said)
+                    if cmd:
+                        # Kept here, said so, and the model's answer (if any) is not read.
+                        yield (await memory.handle(request, req.robot, cmd, req.image,
+                                                   req.prompt)).encode()
+                        return
+                    if rest:
+                        yield rest
+                async for chunk in chunks:
                     yield chunk
         except Exception as e:
             logger.warning("iacore /vlm/stream failed: %s", e)

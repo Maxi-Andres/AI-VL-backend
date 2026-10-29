@@ -89,30 +89,27 @@ def command(prompt: str) -> tuple[str, str] | None:
     return None
 
 
-async def decide(prompt: str, ask_iacore) -> tuple[str, str] | None:
-    """What `prompt` asks to keep: the VLM server decides (iacore /keep, any wording, both
-    languages — patterns missed every new one Whisper wrote); `command()`'s patterns only when
-    it cannot be asked. Questions go to the model too: Whisper puts question marks on orders,
-    and "¿Sacá esta foto de esto?" was dropped here as a question (2026-10-28).
+def decide(prompt: str, said: dict | None) -> tuple[str, str] | None:
+    """What `prompt` asks to keep. The VLM server decides (iacore, any wording, both languages —
+    patterns missed every new one Whisper wrote): `said` is its answer, {"decided", "keep",
+    "note"}, the mark a /vlm/stream with `keep` starts with. `command()`'s patterns only when
+    it could not be asked (`said` None or undecided). Questions go to the model too: Whisper
+    puts question marks on orders, and "¿Sacá esta foto de esto?" was dropped here as a
+    question (2026-10-28).
 
     ("image", ""), ("note", fact), ("seen", the fact read off the frame — "acordate de la
-    medida"), ("ask", "") for a request with the fact missing, or None. `ask_iacore(text)` posts
-    to /keep and returns the response."""
+    medida"), ("ask", "") for a request with the fact missing, or None."""
     text = unicodedata.normalize("NFC", (prompt or "").strip())
     if not _plain(text):
         return None
-    try:
-        said = (await ask_iacore(text)).json()
-        if said.get("decided"):
-            kind = said.get("keep")
-            note = str(said.get("note") or "").strip()[:NOTE_CHARS]
-            if kind == "picture":
-                return ("image", "")
-            if kind == "ask":
-                return ("ask", "")
-            return (kind, note) if kind in ("note", "seen") and note else None
-    except Exception:  # iacore down or old: the patterns still work
-        pass
+    if said and said.get("decided"):
+        kind = said.get("keep")
+        note = str(said.get("note") or "").strip()[:NOTE_CHARS]
+        if kind == "picture":
+            return ("image", "")
+        if kind == "ask":
+            return ("ask", "")
+        return (kind, note) if kind in ("note", "seen") and note else None
     return command(text)
 
 

@@ -80,7 +80,7 @@ def tc():
         yield tc
 
 
-KEEP = {}            # what iacore's /keep answers in a test; {} = it could not decide
+KEEP = {}            # what iacore says on keeping in a test; {} = it could not decide
 
 
 @pytest.fixture
@@ -91,13 +91,15 @@ def iacore(tc, monkeypatch):
     KEEP["images"] = []
 
     def handle(req: httpx.Request) -> httpx.Response:
-        if req.url.path == "/keep":
-            sent = json.loads(req.content)
-            KEEP["asked"].append(sent["text"])
+        sent = json.loads(req.content)
+        got.append(sent)
+        mark = b""
+        if sent.get("keep"):                  # iacore's answer on keeping, said first
+            KEEP["asked"].append(sent["prompt"])
             KEEP["images"].append(sent.get("image", ""))
-            return httpx.Response(200, json=KEEP.get("says", {"decided": False}))
-        got.append(json.loads(req.content))
-        return httpx.Response(200, content=b"En el cajon.")
+            said = KEEP.get("says", {"decided": False, "keep": None, "note": ""})
+            mark = ("\x1ekeep " + json.dumps(said) + "\x1e").encode()
+        return httpx.Response(200, content=mark + b"En el cajon.")
 
     monkeypatch.setattr(gateway, "client", httpx.AsyncClient(
         base_url="http://iacore.test", transport=httpx.MockTransport(handle)))
@@ -117,7 +119,7 @@ def test_a_spoken_picture_and_note_are_kept_and_listed(tc, iacore):
     r = tc.post("/api/vlm/stream", json={"image": frame, "prompt": "Acordate que la llave está en el cajón",
                                          "robot": "g1"})
     assert r.text == "Listo, me lo acuerdo: la llave está en el cajón."
-    assert iacore == [], "no model to keep a file"
+    assert all(sent["keep"] for sent in iacore), "iacore only said whether to keep it"
     listed = tc.get("/api/memory", params={"robot": "g1"}).json()
     kinds = [(m["kind"], m["text"]) for m in listed["items"][:2]]
     assert kinds == [("note", "la llave está en el cajón"), ("image", "")]
@@ -210,3 +212,38 @@ def test_a_request_with_the_fact_missing_is_asked_back(tc, iacore):
     assert tc.post("/api/vlm/stream", json={"prompt": "Acordate de que", "robot": "g1"}).text == \
         "¿Qué querés que me acuerde?"
     assert tc.get("/api/memory", params={"robot": "g1"}).json()["total"] == before
+
+
+def _chunks(*parts):
+    async def gen():
+        for p in parts:
+            yield p
+    return gen()
+
+
+def test_the_keep_mark_is_read_however_the_stream_is_cut():
+    import asyncio
+    mark = b'\x1ekeep {"decided":true,"keep":null,"note":""}\x1e'
+    data = mark + b"Hola."
+
+    async def read(cut):
+        chunks = _chunks(data[:cut], data[cut:])
+        said, rest = await gateway._keep_mark(chunks)
+        return said, rest + b"".join([c async for c in chunks])
+
+    for cut in (1, 5, 20, len(mark), len(mark) + 3):
+        assert asyncio.run(read(cut)) == ({"decided": True, "keep": None, "note": ""}, b"Hola."), cut
+
+
+def test_an_iacore_without_the_mark_is_answered_as_before(tc, iacore, monkeypatch):
+    """An older iacore says nothing about keeping: the patterns decide, the answer goes through."""
+    _robot(tc)
+
+    def old(req):
+        return httpx.Response(200, content=b"En el cajon.")
+    monkeypatch.setattr(gateway, "client", httpx.AsyncClient(
+        base_url="http://iacore.test", transport=httpx.MockTransport(old)))
+    assert tc.post("/api/vlm/stream", json={"prompt": "¿Dónde está la llave?", "robot": "g1"}).text == "En el cajon."
+    assert tc.post("/api/vlm/stream", json={"image": base64.b64encode(JPEG).decode(),
+                                            "prompt": "Guardá esta imagen", "robot": "g1"}).text == \
+        "Listo, guardé la imagen en mi memoria."
