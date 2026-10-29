@@ -304,6 +304,22 @@ class RobotCameraConfig(BaseModel):
     quality: int | None = None
 
 
+async def downstream(service: str, method: str, url: str, read: float = 10.0,
+                     write: float = 5.0, **kwargs) -> JSONResponse:
+    """One call to the robot executor or the camera bridge, relayed as its JSON + status; a
+    502 that names the service when it cannot be reached. Both live on this machine, so a
+    connection per call costs nothing — what this saves is nine copies of the same try/except."""
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=3.0, read=read, write=write, pool=3.0)
+        ) as dc:
+            r = await dc.request(method, url, **kwargs)
+        return JSONResponse(r.json(), status_code=r.status_code)
+    except Exception as e:
+        logger.warning("%s unreachable: %s", service, e)
+        return JSONResponse({"ok": False, "error": f"{service} unreachable: {e}"}, status_code=502)
+
+
 async def proxy_json(call):
     """Await a downstream httpx call and relay its JSON body + status. Map any
     transport failure to a 502 with a clear message (and log it server-side)."""
@@ -409,32 +425,14 @@ async def execute(req: CommandExecuteRequest):
     """Forward a chosen skill to the robot executor (ROS2) so the robot acts on it.
     Kept a one-shot httpx call (the executor may live in a different process/container
     than iacore). Relays the executor's JSON + status; 502 if it's unreachable."""
-    try:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=3.0, read=20.0, write=5.0, pool=3.0)
-        ) as ec:
-            r = await ec.post(f"{EXECUTOR_URL}/execute",
-                              json=req.model_dump(exclude_none=True))
-        return JSONResponse(r.json(), status_code=r.status_code)
-    except Exception as e:
-        logger.warning("robot executor unreachable: %s", e)
-        return JSONResponse(
-            {"ok": False, "error": f"robot executor unreachable: {e}"}, status_code=502)
+    return await downstream("robot executor", "POST", f"{EXECUTOR_URL}/execute",
+                            json=req.model_dump(exclude_none=True), read=20.0)
 
 
 @app.get("/api/robot-net")
 async def robot_net():
     """Current DDS transport of the robot executor (interface + unicast peers)."""
-    try:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=3.0, read=8.0, write=5.0, pool=3.0)
-        ) as ec:
-            r = await ec.get(f"{EXECUTOR_URL}/dds")
-        return JSONResponse(r.json(), status_code=r.status_code)
-    except Exception as e:
-        logger.warning("robot executor unreachable: %s", e)
-        return JSONResponse(
-            {"ok": False, "error": f"robot executor unreachable: {e}"}, status_code=502)
+    return await downstream("robot executor", "GET", f"{EXECUTOR_URL}/dds", read=8.0)
 
 
 @app.post("/api/robot-net")
@@ -442,17 +440,8 @@ async def set_robot_net(req: RobotNetConfig):
     """Point the stack at the robot on another network (e.g. its wlan0 on another VLAN).
     The executor persists it and RESTARTS itself to apply it — CycloneDDS reads its
     config once per process — so expect a few seconds of downtime after this returns."""
-    try:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=3.0, read=15.0, write=5.0, pool=3.0)
-        ) as ec:
-            r = await ec.post(f"{EXECUTOR_URL}/dds",
-                              json=req.model_dump(exclude_none=True))
-        return JSONResponse(r.json(), status_code=r.status_code)
-    except Exception as e:
-        logger.warning("robot executor unreachable: %s", e)
-        return JSONResponse(
-            {"ok": False, "error": f"robot executor unreachable: {e}"}, status_code=502)
+    return await downstream("robot executor", "POST", f"{EXECUTOR_URL}/dds",
+                            json=req.model_dump(exclude_none=True), read=15.0)
 
 
 # --- Robot reachability ---------------------------------------------------------------- #
@@ -505,17 +494,8 @@ async def robot_transport():
 async def set_robot_transport(req: RobotTransportConfig):
     """Switch a robot between DDS and the on-robot relay. The executor persists it and
     RESTARTS to apply it, so expect a few seconds of downtime after this returns."""
-    try:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=3.0, read=15.0, write=5.0, pool=3.0)
-        ) as ec:
-            r = await ec.post(f"{EXECUTOR_URL}/transport",
-                              json=req.model_dump(exclude_none=True))
-        return JSONResponse(r.json(), status_code=r.status_code)
-    except Exception as e:
-        logger.warning("robot executor unreachable: %s", e)
-        return JSONResponse(
-            {"ok": False, "error": f"robot executor unreachable: {e}"}, status_code=502)
+    return await downstream("robot executor", "POST", f"{EXECUTOR_URL}/transport",
+                            json=req.model_dump(exclude_none=True), read=15.0)
 
 
 # The H.264/WebRTC drive view, negotiated through here instead of with mediamtx directly.
@@ -578,16 +558,8 @@ async def robot_video(robot: str = "go2"):
 
     Running and saved are reported separately on purpose — editing the robot's video.env
     without restarting the publisher is exactly how this report used to lie."""
-    try:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=3.0, read=8.0, write=5.0, pool=3.0)
-        ) as ec:
-            r = await ec.get(f"{EXECUTOR_URL}/video", params={"robot": robot})
-        return JSONResponse(r.json(), status_code=r.status_code)
-    except Exception as e:
-        logger.warning("robot executor unreachable: %s", e)
-        return JSONResponse(
-            {"ok": False, "error": f"robot executor unreachable: {e}"}, status_code=502)
+    return await downstream("robot executor", "GET", f"{EXECUTOR_URL}/video",
+                            params={"robot": robot}, read=8.0)
 
 
 @app.post("/api/robot-video")
@@ -598,17 +570,8 @@ async def set_robot_video(req: RobotVideoConfig):
     The gateway does not validate the values: the on-robot relay owns the allowlist and
     the ranges, and duplicating them here would give us two sources of truth for the same
     contract and one of them would drift."""
-    try:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=3.0, read=10.0, write=5.0, pool=3.0)
-        ) as ec:
-            r = await ec.post(f"{EXECUTOR_URL}/video",
-                              json=req.model_dump(exclude_none=True))
-        return JSONResponse(r.json(), status_code=r.status_code)
-    except Exception as e:
-        logger.warning("robot executor unreachable: %s", e)
-        return JSONResponse(
-            {"ok": False, "error": f"robot executor unreachable: {e}"}, status_code=502)
+    return await downstream("robot executor", "POST", f"{EXECUTOR_URL}/video",
+                            json=req.model_dump(exclude_none=True), read=10.0)
 
 
 @app.post("/api/robot-camera/config")
@@ -616,17 +579,8 @@ async def robot_camera_config(req: RobotCameraConfig):
     """Reconfigure the shared robot-camera source (fps/resolution/quality) via the
     bridge. One call affects every viewer, since they all watch the same source.
     Declared BEFORE the /{action} route so "config" isn't captured as an action."""
-    try:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=3.0, read=10.0, write=5.0, pool=3.0)
-        ) as cc:
-            r = await cc.post(f"{CAMERA_CONTROL_URL}/config",
-                              json=req.model_dump(exclude_none=True))
-        return JSONResponse(r.json(), status_code=r.status_code)
-    except Exception as e:
-        logger.warning("camera bridge unreachable: %s", e)
-        return JSONResponse(
-            {"ok": False, "error": f"camera bridge unreachable: {e}"}, status_code=502)
+    return await downstream("camera bridge", "POST", f"{CAMERA_CONTROL_URL}/config",
+                            json=req.model_dump(exclude_none=True), read=10.0)
 
 
 @app.post("/api/robot-camera/{action}")
@@ -635,16 +589,7 @@ async def robot_camera(action: str):
     The bridge, while streaming, feeds frames to /ws/robot-cam below."""
     if action not in ("start", "stop"):
         return JSONResponse({"ok": False, "error": "unknown action"}, status_code=400)
-    try:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=3.0, read=10.0, write=5.0, pool=3.0)
-        ) as cc:
-            r = await cc.post(f"{CAMERA_CONTROL_URL}/{action}")
-        return JSONResponse(r.json(), status_code=r.status_code)
-    except Exception as e:
-        logger.warning("camera bridge unreachable: %s", e)
-        return JSONResponse(
-            {"ok": False, "error": f"camera bridge unreachable: {e}"}, status_code=502)
+    return await downstream("camera bridge", "POST", f"{CAMERA_CONTROL_URL}/{action}", read=10.0)
 
 
 _frigate_cache: "tuple[float, dict[str, bool] | None]" = (0.0, None)
@@ -807,17 +752,9 @@ async def speak(req: SpeakRequest):
 # --------------------------------------------------------------------------- #
 async def _executor_audio(method: str, path: str, robot: str, content: bytes = b"",
                           ctype: str = "application/json") -> JSONResponse:
-    try:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=3.0, read=25.0, write=10.0, pool=3.0)
-        ) as ec:
-            r = await ec.request(method, f"{EXECUTOR_URL}{path}", params={"robot": robot},
-                                 content=content or None, headers={"Content-Type": ctype})
-        return JSONResponse(r.json(), status_code=r.status_code)
-    except Exception as e:
-        logger.warning("robot executor unreachable: %s", e)
-        return JSONResponse(
-            {"ok": False, "error": f"robot executor unreachable: {e}"}, status_code=502)
+    return await downstream("robot executor", method, f"{EXECUTOR_URL}{path}",
+                            params={"robot": robot}, content=content or None,
+                            headers={"Content-Type": ctype}, read=25.0, write=10.0)
 
 
 @app.post("/api/robot-audio/say")
