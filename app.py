@@ -455,6 +455,44 @@ async def execute(req: CommandExecuteRequest):
                             json=req.model_dump(exclude_none=True), read=20.0)
 
 
+class AgentRequest(BaseModel):
+    text: str = Field(..., min_length=1, max_length=1000)
+
+
+@app.post("/api/agent")
+async def agent(req: AgentRequest):
+    """The /agent tab: iacore carries the instruction out with the robot's tools and streams
+    the trace (Server-Sent Events, one JSON event per line). Relayed unchanged as it comes;
+    iacore unreachable is an SSE error event, so the tab shows it in the trace."""
+    async def gen():
+        try:
+            async with client.stream("POST", "/agent", json=req.model_dump()) as r:
+                if r.status_code != 200:
+                    detail = (await r.aread())[:300].decode("utf-8", "replace")
+                    yield _sse({"type": "error", "text": f"iacore {r.status_code}: {detail}"})
+                    yield b"event: end\ndata: {}\n\n"
+                    return
+                async for chunk in r.aiter_bytes():
+                    yield chunk
+        except Exception as e:
+            logger.warning("iacore /agent failed: %s", e)
+            yield _sse({"type": "error", "text": f"iacore unreachable: {e}"})
+            yield b"event: end\ndata: {}\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
+
+def _sse(event: dict) -> bytes:
+    return f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode()
+
+
+@app.post("/api/agent/stop")
+async def agent_stop():
+    """STOP for the /agent tab: iacore ends the run and takes the arm home before letting go."""
+    return await proxy_json(client.post("/agent/stop"))
+
+
 @app.get("/api/robot-net")
 async def robot_net():
     """Current DDS transport of the robot executor (interface + unicast peers)."""

@@ -151,6 +151,10 @@ POLICY: dict[tuple[str, str], str] = {
     ("WS", "/ws/detect"): "analyze",
     # operate — the robot moves, speaks, or its microphone opens.
     ("POST", "/api/execute"): "operate",
+    # The /agent tab: an instruction carried out with the robot's tools — it moves the robot.
+    ("POST", "/api/agent"): "operate",
+    # Its STOP: whoever can see the robot may stop it.
+    ("POST", "/api/agent/stop"): "view",
     ("POST", "/api/robot-camera/{action}"): "operate",
     ("POST", "/api/robot-audio/say"): "operate",
     ("POST", "/api/robot-audio/stop"): "operate",
