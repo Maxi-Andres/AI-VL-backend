@@ -36,6 +36,14 @@ class FakeExecutor(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self.server.gets.append(self.path)
+        if self.path.startswith("/odom/trail"):
+            out = json.dumps({"ok": True, "points": []}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(out)))
+            self.end_headers()
+            self.wfile.write(out)
+            return
         self.send_response(200)
         self.send_header("Content-Type", "application/x-ndjson")
         self.end_headers()
@@ -114,3 +122,10 @@ def test_the_lidar_cloud_arrives_from_lidar_cloud(tc, executor):
         while not recv(ws).get("final"):
             pass
     assert executor.gets == ["/lidar/cloud?robot=g1"]
+
+
+def test_the_trail_is_read_and_cleared_on_the_robot(tc, executor):
+    tc.get("/api/odom-trail")
+    tc.post("/api/odom-trail")
+    assert executor.gets[-1] == "/odom/trail?robot=g1"
+    assert executor.posts[-1][0] == "/odom/trail?robot=g1"

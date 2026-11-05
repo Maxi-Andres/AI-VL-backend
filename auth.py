@@ -131,6 +131,7 @@ POLICY: dict[tuple[str, str], str] = {
     ("WS", "/ws/lidar"): "view",
     ("WS", "/ws/lidar-cloud"): "view",
     ("GET", "/api/walk"): "view",
+    ("GET", "/api/odom-trail"): "view",
     ("GET", "/api/fleet"): "view",
     ("GET", "/api/sites/{site_id}/plan"): "view",
     # analyze — spend GPU on the models; nothing reaches the robot.
@@ -165,6 +166,7 @@ POLICY: dict[tuple[str, str], str] = {
     ("POST", "/api/robot-audio/volume"): "operate",
     ("WS", "/ws/joint-control"): "operate",
     ("POST", "/api/walk"): "operate",                  # MOVES the robot: walk to a point
+    ("POST", "/api/odom-trail"): "operate",            # clears the trail everyone sees
     ("WS", "/ws/robot-ear"): "operate",
     # configure — change how the stack reaches and streams from the robot.
     ("POST", "/api/robot-net"): "configure",

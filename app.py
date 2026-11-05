@@ -870,6 +870,21 @@ async def walk_status(robot: str = "g1"):
                             params={"robot": robot}, json={"op": "status"})
 
 
+@app.get("/api/odom-trail")
+async def odom_trail(robot: str = "g1"):
+    """Where the G1 walked since it booted, recorded on the robot whoever moved it: the
+    Navigation page draws it on opening, so a tab change or a drive from /drive loses nothing."""
+    return await downstream("robot executor", "GET", f"{EXECUTOR_URL}/odom/trail",
+                            params={"robot": robot})
+
+
+@app.post("/api/odom-trail")
+async def clear_odom_trail(robot: str = "g1"):
+    """Start the trail again (for everyone watching: it lives on the robot)."""
+    return await downstream("robot executor", "POST", f"{EXECUTOR_URL}/odom/trail",
+                            params={"robot": robot})
+
+
 @app.post("/api/robot-audio/stop")
 async def robot_audio_stop(robot: str = "go2"):
     return await _executor_audio("POST", "/audio/stop", robot)
