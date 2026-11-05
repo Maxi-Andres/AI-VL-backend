@@ -241,6 +241,17 @@ class RobotVolumeRequest(BaseModel):
     level: int
 
 
+class WalkRequest(BaseModel):
+    """The G1 walks to a pose RELATIVE to where it stands: dx m forward, dy m left, dyaw rad
+    left. The loop runs on the robot (robot-command-relay, relay_server.Walk), which also owns
+    the limits; this only checks the shape."""
+    robot: str = "g1"
+    op: str = Field(pattern="^(goto|cancel|status)$")
+    dx: float = 0.0
+    dy: float = 0.0
+    dyaw: float = 0.0
+
+
 class CommandRequest(BaseModel):
     text: str = ""
     image: str | None = None
@@ -840,6 +851,25 @@ async def robot_say(req: RobotSayRequest):
     return await _executor_audio("POST", "/audio/say", req.robot, r.content, "audio/wav")
 
 
+@app.post("/api/walk")
+async def walk(req: WalkRequest):
+    """Walk the G1 to a pose relative to where it stands ({op: goto, dx, dy, dyaw}), cancel it,
+    or read how it is going. The answer's `walk` is the relay's: state success | uncertain |
+    failure | cancelled, reason, error {pos_m, yaw_deg}, start / goal / pose in the odom frame."""
+    body: dict = {"op": req.op}
+    if req.op == "goto":
+        body.update(dx=req.dx, dy=req.dy, dyaw=req.dyaw)
+    return await downstream("robot executor", "POST", f"{EXECUTOR_URL}/walk/control",
+                            params={"robot": req.robot}, json=body)
+
+
+@app.get("/api/walk")
+async def walk_status(robot: str = "g1"):
+    """How the last walk to a point went (or is going): read-only."""
+    return await downstream("robot executor", "POST", f"{EXECUTOR_URL}/walk/control",
+                            params={"robot": robot}, json={"op": "status"})
+
+
 @app.post("/api/robot-audio/stop")
 async def robot_audio_stop(robot: str = "go2"):
     return await _executor_audio("POST", "/audio/stop", robot)
@@ -1397,14 +1427,16 @@ async def ws_robot_cam(ws: WebSocket):
 JOINT_STREAM_TIMEOUT = httpx.Timeout(connect=5.0, read=8.0, write=5.0, pool=5.0)
 
 
-async def _pump_joint_stream(robot: str, q: "asyncio.Queue") -> None:
+async def _pump_joint_stream(robot: str, q: "asyncio.Queue", route: str = "/joints/stream",
+                             what: str = "joint stream") -> None:
     """Upstream lines (str) into `q`, newest wins. Always ends with ONE final dict saying why
-    the stream stopped, so the page can show it instead of a bare disconnect."""
-    final = {"error": "the robot's joint stream ended"}
+    the stream stopped, so the page can show it instead of a bare disconnect. `route` picks the
+    executor's stream: the joints, or the odometry (/odom/stream, the same NDJSON shape)."""
+    final = {"error": f"the robot's {what} ended"}
     try:
         async with (
             httpx.AsyncClient(timeout=JOINT_STREAM_TIMEOUT) as ec,
-            ec.stream("GET", f"{EXECUTOR_URL}/joints/stream", params={"robot": robot}) as r,
+            ec.stream("GET", f"{EXECUTOR_URL}{route}", params={"robot": robot}) as r,
         ):
             if r.status_code != 200:
                 raw = (await r.aread())[:500]
@@ -1429,9 +1461,21 @@ async def _pump_joint_stream(robot: str, q: "asyncio.Queue") -> None:
 async def ws_joints(ws: WebSocket, robot: str = "g1"):
     """The Joints page's live feed: one text message per robot tick, newest wins. The last
     message before the socket closes is {"error": ..., "final": true}; the page reconnects."""
+    await _ws_robot_stream(ws, robot, "/joints/stream", "joint stream")
+
+
+@app.websocket("/ws/odom")
+async def ws_odom(ws: WebSocket, robot: str = "g1"):
+    """The Navigation page's live pose: the G1's own odometry ({t, age_ms, x, y, z, yaw, vx, vy,
+    wz}, odom frame, g1_odom_bridge in robot-command-relay), one message per tick, newest wins.
+    Read-only, exactly like /ws/joints: moving is POST /api/walk."""
+    await _ws_robot_stream(ws, robot, "/odom/stream", "odometry stream")
+
+
+async def _ws_robot_stream(ws: WebSocket, robot: str, route: str, what: str) -> None:
     await ws.accept()
     q: asyncio.Queue = asyncio.Queue(maxsize=1)
-    pump = asyncio.create_task(_pump_joint_stream(robot, q))
+    pump = asyncio.create_task(_pump_joint_stream(robot, q, route, what))
 
     async def send_loop() -> None:
         while True:
