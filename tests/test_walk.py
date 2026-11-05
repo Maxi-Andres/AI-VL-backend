@@ -100,3 +100,10 @@ def test_the_odometry_arrives_from_odom_stream(tc, executor):
             got.append(msg["x"])
     assert got and got == sorted(got) and got[-1] == 1
     assert executor.gets == ["/odom/stream?robot=g1"]
+
+
+def test_the_lidar_map_arrives_from_lidar_stream(tc, executor):
+    with tc.websocket_connect("/ws/lidar?robot=g1") as ws:
+        while not recv(ws).get("final"):
+            pass
+    assert executor.gets == ["/lidar/stream?robot=g1"]

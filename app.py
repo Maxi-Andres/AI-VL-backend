@@ -1472,6 +1472,13 @@ async def ws_odom(ws: WebSocket, robot: str = "g1"):
     await _ws_robot_stream(ws, robot, "/odom/stream", "odometry stream")
 
 
+@app.websocket("/ws/lidar")
+async def ws_lidar(ws: WebSocket, robot: str = "g1"):
+    """The Navigation page's obstacle map: what the G1's Mid-360 sees around it ({pts_s, floor,
+    tilt_deg, pose, res, cells}, g1_lidar_bridge in robot-command-relay, 2 Hz). Read-only."""
+    await _ws_robot_stream(ws, robot, "/lidar/stream", "lidar stream")
+
+
 async def _ws_robot_stream(ws: WebSocket, robot: str, route: str, what: str) -> None:
     await ws.accept()
     q: asyncio.Queue = asyncio.Queue(maxsize=1)
