@@ -107,3 +107,10 @@ def test_the_lidar_map_arrives_from_lidar_stream(tc, executor):
         while not recv(ws).get("final"):
             pass
     assert executor.gets == ["/lidar/stream?robot=g1"]
+
+
+def test_the_lidar_cloud_arrives_from_lidar_cloud(tc, executor):
+    with tc.websocket_connect("/ws/lidar-cloud?robot=g1") as ws:
+        while not recv(ws).get("final"):
+            pass
+    assert executor.gets == ["/lidar/cloud?robot=g1"]

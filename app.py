@@ -1479,6 +1479,13 @@ async def ws_lidar(ws: WebSocket, robot: str = "g1"):
     await _ws_robot_stream(ws, robot, "/lidar/stream", "lidar stream")
 
 
+@app.websocket("/ws/lidar-cloud")
+async def ws_lidar_cloud(ws: WebSocket, robot: str = "g1"):
+    """The Navigation page's 3D view: the point cloud around the G1, ~1 Hz, ~100 KB a message
+    ({kind: "cloud", pose, res, n, xyz: base64 int16 cm}, g1_lidar_bridge). Read-only."""
+    await _ws_robot_stream(ws, robot, "/lidar/cloud", "lidar cloud")
+
+
 async def _ws_robot_stream(ws: WebSocket, robot: str, route: str, what: str) -> None:
     await ws.accept()
     q: asyncio.Queue = asyncio.Queue(maxsize=1)

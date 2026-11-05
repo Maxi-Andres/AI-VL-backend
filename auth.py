@@ -129,6 +129,7 @@ POLICY: dict[tuple[str, str], str] = {
     ("WS", "/ws/joints"): "view",
     ("WS", "/ws/odom"): "view",
     ("WS", "/ws/lidar"): "view",
+    ("WS", "/ws/lidar-cloud"): "view",
     ("GET", "/api/walk"): "view",
     ("GET", "/api/fleet"): "view",
     ("GET", "/api/sites/{site_id}/plan"): "view",
