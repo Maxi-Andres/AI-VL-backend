@@ -129,3 +129,8 @@ def test_the_trail_is_read_and_cleared_on_the_robot(tc, executor):
     tc.post("/api/odom-trail")
     assert executor.gets[-1] == "/odom/trail?robot=g1"
     assert executor.posts[-1][0] == "/odom/trail?robot=g1"
+
+
+def test_a_plan_carries_its_numbers_too(tc, executor):
+    tc.post("/api/walk", json={"op": "plan", "dx": 1.5})
+    assert executor.posts[-1][1] == {"op": "plan", "dx": 1.5, "dy": 0.0, "dyaw": 0.0}

@@ -246,7 +246,7 @@ class WalkRequest(BaseModel):
     left. The loop runs on the robot (robot-command-relay, relay_server.Walk), which also owns
     the limits; this only checks the shape."""
     robot: str = "g1"
-    op: str = Field(pattern="^(goto|cancel|status)$")
+    op: str = Field(pattern="^(goto|plan|cancel|status)$")
     dx: float = 0.0
     dy: float = 0.0
     dyaw: float = 0.0
@@ -857,7 +857,7 @@ async def walk(req: WalkRequest):
     or read how it is going. The answer's `walk` is the relay's: state success | uncertain |
     failure | cancelled, reason, error {pos_m, yaw_deg}, start / goal / pose in the odom frame."""
     body: dict = {"op": req.op}
-    if req.op == "goto":
+    if req.op in ("goto", "plan"):          # plan: the way it would take, nothing moves
         body.update(dx=req.dx, dy=req.dy, dyaw=req.dyaw)
     return await downstream("robot executor", "POST", f"{EXECUTOR_URL}/walk/control",
                             params={"robot": req.robot}, json=body)
