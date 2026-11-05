@@ -38,6 +38,7 @@ import os
 import re
 import time
 from contextlib import asynccontextmanager
+from typing import Literal
 
 import httpx
 from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -252,7 +253,7 @@ class WalkRequest(BaseModel):
     dyaw: float = 0.0
     # The walk's top speeds {vx, vy, vyaw} (the page's Slow / Normal / Fast / Max, as on the drive
     # pad) and the locomotion mode to walk in; both optional, both checked again on the robot.
-    speed: dict[str, float] | None = None
+    speed: dict[str, float] | Literal["auto"] | None = None
     mode: str | None = Field(default=None, pattern="^(walk|run)$")
 
 
@@ -864,7 +865,9 @@ async def walk(req: WalkRequest):
     if req.op in ("goto", "plan"):          # plan: the way it would take, nothing moves
         body.update(dx=req.dx, dy=req.dy, dyaw=req.dyaw)
     if req.op == "goto":
-        if req.speed is not None:
+        if req.speed == "auto":
+            body["speed"] = "auto"            # the robot picks it from how open the way is
+        elif req.speed is not None:
             body["speed"] = {k: req.speed[k] for k in ("vx", "vy", "vyaw") if k in req.speed}
         if req.mode is not None:
             body["mode"] = req.mode

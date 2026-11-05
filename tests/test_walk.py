@@ -142,3 +142,9 @@ def test_speed_and_mode_reach_the_robot_on_a_goto_only(tc, executor):
     assert executor.posts[-1][1] == {"op": "goto", "dx": 1.0, "dy": 0.0, "dyaw": 0.0,
                                      "speed": {"vx": 0.9, "vy": 0.4, "vyaw": 1.0}, "mode": "run"}
     assert tc.post("/api/walk", json={"op": "goto", "dx": 1, "mode": "fly"}).status_code == 422
+
+
+def test_auto_speed_passes_as_auto(tc, executor):
+    tc.post("/api/walk", json={"op": "goto", "dx": 1, "speed": "auto"})
+    assert executor.posts[-1][1]["speed"] == "auto"
+    assert tc.post("/api/walk", json={"op": "goto", "dx": 1, "speed": "fast"}).status_code == 422
