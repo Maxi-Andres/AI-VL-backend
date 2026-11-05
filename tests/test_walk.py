@@ -134,3 +134,11 @@ def test_the_trail_is_read_and_cleared_on_the_robot(tc, executor):
 def test_a_plan_carries_its_numbers_too(tc, executor):
     tc.post("/api/walk", json={"op": "plan", "dx": 1.5})
     assert executor.posts[-1][1] == {"op": "plan", "dx": 1.5, "dy": 0.0, "dyaw": 0.0}
+
+
+def test_speed_and_mode_reach_the_robot_on_a_goto_only(tc, executor):
+    tc.post("/api/walk", json={"op": "goto", "dx": 1, "speed": {"vx": 0.9, "vy": 0.4, "vyaw": 1.0,
+                                                               "evil": 9}, "mode": "run"})
+    assert executor.posts[-1][1] == {"op": "goto", "dx": 1.0, "dy": 0.0, "dyaw": 0.0,
+                                     "speed": {"vx": 0.9, "vy": 0.4, "vyaw": 1.0}, "mode": "run"}
+    assert tc.post("/api/walk", json={"op": "goto", "dx": 1, "mode": "fly"}).status_code == 422

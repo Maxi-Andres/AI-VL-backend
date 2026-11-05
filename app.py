@@ -250,6 +250,10 @@ class WalkRequest(BaseModel):
     dx: float = 0.0
     dy: float = 0.0
     dyaw: float = 0.0
+    # The walk's top speeds {vx, vy, vyaw} (the page's Slow / Normal / Fast / Max, as on the drive
+    # pad) and the locomotion mode to walk in; both optional, both checked again on the robot.
+    speed: dict[str, float] | None = None
+    mode: str | None = Field(default=None, pattern="^(walk|run)$")
 
 
 class CommandRequest(BaseModel):
@@ -859,6 +863,11 @@ async def walk(req: WalkRequest):
     body: dict = {"op": req.op}
     if req.op in ("goto", "plan"):          # plan: the way it would take, nothing moves
         body.update(dx=req.dx, dy=req.dy, dyaw=req.dyaw)
+    if req.op == "goto":
+        if req.speed is not None:
+            body["speed"] = {k: req.speed[k] for k in ("vx", "vy", "vyaw") if k in req.speed}
+        if req.mode is not None:
+            body["mode"] = req.mode
     return await downstream("robot executor", "POST", f"{EXECUTOR_URL}/walk/control",
                             params={"robot": req.robot}, json=body)
 
