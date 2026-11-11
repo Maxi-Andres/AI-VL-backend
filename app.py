@@ -1454,11 +1454,12 @@ async def ws_robot_cam(ws: WebSocket):
 JOINT_STREAM_TIMEOUT = httpx.Timeout(connect=5.0, read=8.0, write=5.0, pool=5.0)
 
 
-async def _pump_joint_stream(robot: str, q: "asyncio.Queue", route: str = "/joints/stream",
-                             what: str = "joint stream") -> None:
+async def _pump_joint_stream(robot: str, q: "asyncio.Queue | None", route: str = "/joints/stream",
+                             what: str = "joint stream", put=None) -> None:
     """Upstream lines (str) into `q`, newest wins. Always ends with ONE final dict saying why
     the stream stopped, so the page can show it instead of a bare disconnect. `route` picks the
     executor's stream: the joints, or the odometry (/odom/stream, the same NDJSON shape)."""
+    put = put or (lambda item: _put_latest(q, item))
     final = {"error": f"the robot's {what} ended"}
     try:
         async with (
@@ -1475,13 +1476,60 @@ async def _pump_joint_stream(robot: str, q: "asyncio.Queue", route: str = "/join
                 return
             async for line in r.aiter_lines():
                 if line.startswith("{"):
-                    _put_latest(q, line)
+                    put(line)
     except asyncio.CancelledError:
         raise
     except Exception as e:
         final = {"error": f"robot executor unreachable: {e}"}
     finally:
-        _put_latest(q, {**final, "final": True})
+        put({**final, "final": True})
+
+
+class _StreamHub:
+    """ONE upstream request per (robot, route), shared by every viewer of it. Each browser used
+    to open its own, all the way to the robot, and the relay keeps 4 places a stream: two open
+    Navigation pages (map + cloud each) took all of them on 2026-11-11. Newest wins per viewer,
+    as before; the upstream starts with the first viewer and stops after the last."""
+
+    def __init__(self, key: tuple[str, str], what: str) -> None:
+        self.key, self.what = key, what
+        self.subs: set[asyncio.Queue] = set()
+        self.task: asyncio.Task | None = None
+
+    def put(self, item) -> None:
+        for q in list(self.subs):
+            _put_latest(q, item)
+
+    async def _run(self) -> None:
+        try:
+            await _pump_joint_stream(self.key[0], None, self.key[1], self.what, put=self.put)
+        finally:
+            if _STREAM_HUBS.get(self.key) is self:
+                del _STREAM_HUBS[self.key]   # ended: the next viewer starts a fresh one
+
+
+_STREAM_HUBS: dict[tuple[str, str], _StreamHub] = {}
+
+
+def _hub_join(robot: str, route: str, what: str) -> tuple[_StreamHub, asyncio.Queue]:
+    key = (robot, route)
+    hub = _STREAM_HUBS.get(key)
+    if hub is None:
+        hub = _STREAM_HUBS[key] = _StreamHub(key, what)
+    q: asyncio.Queue = asyncio.Queue(maxsize=1)
+    hub.subs.add(q)
+    if hub.task is None:
+        hub.task = asyncio.create_task(hub._run())
+    return hub, q
+
+
+def _hub_leave(hub: _StreamHub, q: asyncio.Queue) -> None:
+    hub.subs.discard(q)
+    if not hub.subs:
+        if _STREAM_HUBS.get(hub.key) is hub:
+            del _STREAM_HUBS[hub.key]
+        if hub.task is not None:
+            hub.task.cancel()
 
 
 @app.websocket("/ws/joints")
@@ -1515,8 +1563,7 @@ async def ws_lidar_cloud(ws: WebSocket, robot: str = "g1"):
 
 async def _ws_robot_stream(ws: WebSocket, robot: str, route: str, what: str) -> None:
     await ws.accept()
-    q: asyncio.Queue = asyncio.Queue(maxsize=1)
-    pump = asyncio.create_task(_pump_joint_stream(robot, q, route, what))
+    hub, q = _hub_join(robot, route, what)
 
     async def send_loop() -> None:
         while True:
@@ -1537,8 +1584,9 @@ async def _ws_robot_stream(ws: WebSocket, robot: str, route: str, what: str) -> 
     except (WebSocketDisconnect, RuntimeError):
         pass
     finally:
-        for t in (*tasks, pump):
+        for t in tasks:
             t.cancel()
+        _hub_leave(hub, q)
         try:
             await ws.close()
         except RuntimeError:

@@ -112,3 +112,14 @@ def test_a_viewer_leaving_releases_the_upstream(tc, executor):
     assert executor.hung_up.wait(5), \
         "the upstream stream must be closed when the viewer leaves, or each page reload " \
         "leaves a stream open all the way to the robot"
+
+
+def test_two_viewers_share_one_upstream_request(tc, executor):
+    """Two pages watching the same stream cost the robot ONE place, not two (2026-11-11: two
+    Navigation pages took the relay's 4 lidar places and a walk's plan found none)."""
+    executor.mode = "endless"
+    with tc.websocket_connect("/ws/joints?robot=g1") as a, \
+            tc.websocket_connect("/ws/joints?robot=g1") as b:
+        assert recv(a) and recv(b)
+        assert len(executor.requests) == 1, executor.requests
+    assert executor.hung_up.wait(3), "the last viewer leaving releases the upstream"
