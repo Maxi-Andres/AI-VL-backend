@@ -34,6 +34,8 @@ os.environ.pop("DATABASE_URL", None)
 os.environ["ROBOT_WATCH_SECONDS"] = "0"
 # No daily backup in the background either: tests/test_backup.py runs one when it wants one.
 os.environ["PILOT_BACKUP_HOURS"] = "0"
+# No walk watch: it would read a real executor's walks and could open a real robot's mic.
+os.environ["EAR_WALK_WATCH_SECONDS"] = "0"
 
 
 def pytest_configure(config):

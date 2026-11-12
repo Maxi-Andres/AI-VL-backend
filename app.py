@@ -32,6 +32,7 @@ Run (from the backend repo root, venv active):
     uvicorn app:app --host 0.0.0.0 --port 8000
 """
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -52,6 +53,7 @@ import backup
 import chats
 import fleet
 import memory
+import robot_ear
 import robot_watch
 import sso
 import team
@@ -107,9 +109,15 @@ async def lifespan(app):
     )
     watch = robot_watch.start(EXECUTOR_URL)
     backups = backup.start()
+    walks = asyncio.create_task(_watch_walks(), name="walk-watch") if WALK_WATCH_S > 0 else None
     try:
         yield
     finally:
+        if walks is not None:
+            walks.cancel()
+        for ear in list(_EARS.values()):
+            await ear.off("the gateway is shutting down")
+        _EARS.clear()
         await backup.stop(backups)
         await robot_watch.stop(watch)
         await client.aclose()
@@ -844,8 +852,12 @@ async def robot_say(req: RobotSayRequest):
     text = req.text.strip()
     if not text:
         return JSONResponse({"ok": False, "error": "empty text"}, status_code=400)
+    return await _robot_say_wav(req.robot, text, req.voice)
+
+
+async def _robot_say_wav(robot: str, text: str, voice: str | None) -> JSONResponse:
     try:
-        r = await client.post("/speak", json={"text": text, "voice": req.voice})
+        r = await client.post("/speak", json={"text": text, "voice": voice})
     except Exception as e:
         logger.warning("iacore /speak failed: %s", e)
         return JSONResponse({"ok": False, "error": f"iacore unreachable: {e}"},
@@ -853,7 +865,7 @@ async def robot_say(req: RobotSayRequest):
     if r.status_code != 200 or not r.content.startswith(b"RIFF"):
         return JSONResponse({"ok": False, "error": f"TTS failed: HTTP {r.status_code}"},
                             status_code=502)
-    return await _executor_audio("POST", "/audio/say", req.robot, r.content, "audio/wav")
+    return await _executor_audio("POST", "/audio/say", robot, r.content, "audio/wav")
 
 
 @app.post("/api/walk")
@@ -1594,29 +1606,15 @@ async def _ws_robot_stream(ws: WebSocket, robot: str, route: str, what: str) -> 
 
 
 # --------------------------------------------------------------------------- #
-# The robot's ear (G1): its own microphone, listened to Alexa-style.
+# The robot's ear (G1): its own microphone, listened to Alexa-style, HELD HERE (robot_ear.py).
 #
-#   robot mic --relay--> executor --HTTP stream--> THIS --WS binary--> iacore /ws/ear
-#   iacore's events (speech / heard / wake / command) --> THIS --WS text--> browser
+#   robot mic --relay--> executor --HTTP stream--> robot_ear.Ear --WS binary--> iacore /ws/ear
+#   iacore's events --> every page watching (/ws/robot-ear), and "Bender, ..." --> the agent
 #
-# The page's "robot mic" switch IS this socket: opening it opens the robot's microphone (the
-# relay turns mic mode on for an open stream) and closing it closes it, at once. The page's
-# {"type": "mute", "on": bool, "barge": bool} goes on to iacore, so the ear is deaf while the
-# robot speaks and never answers its own voice — but for its name, with "barge", to interrupt. The socket's last message is {"type": "error", "error": why}.
-# Audio only flows here and to iacore; the browser gets text.
+# ONE ear per robot. Pages only switch it on and watch it — two pages once both answered every
+# command (2026-10-19); now neither answers, the agent does — and a walk that someone blocks
+# opens it by itself (_watch_walks), with no page open at all (2026-11-12).
 # --------------------------------------------------------------------------- #
-EAR_TIMEOUT = httpx.Timeout(connect=3.0, read=10.0, write=5.0, pool=3.0)
-# ONE ear per robot. Two pages listening (two tabs, a phone and a PC) each answered every
-# command, and switching the mic off in one left the robot listening through the other
-# (2026-10-19). A new page takes the ear from the old one, and {"type": "off"} from any page
-# switches it off for all of them: like a physical switch.
-_ears: dict = {}                     # robot -> {asyncio.Event: reason}, one per open socket
-
-
-def _stop_ears(robot: str, reason: str) -> None:
-    for stop in list(_ears.get(robot, {})):
-        _ears[robot][stop] = reason
-        stop.set()
 IACORE_WS_URL = os.environ.get("IACORE_WS_URL", "ws" + IACORE_URL[4:]
                                if IACORE_URL.startswith("http") else IACORE_URL)
 
@@ -1626,89 +1624,203 @@ def _ear_connect():
     return ws_connect(f"{IACORE_WS_URL}/ws/ear", max_size=2**20, open_timeout=5)
 
 
+_EARS: dict[str, robot_ear.Ear] = {}
+
+
+def _ear_for(robot: str) -> robot_ear.Ear:
+    if robot not in _EARS:
+        _EARS[robot] = robot_ear.Ear(robot, lambda: EXECUTOR_URL, lambda: _ear_connect(),
+                                     on_command=_bender_heard, on_wake=_bender_called)
+    return _EARS[robot]
+
+
 @app.websocket("/ws/robot-ear")
 async def ws_robot_ear(ws: WebSocket, robot: str = "g1"):
+    """A page's robot-mic switch: while it is open the robot's microphone is on (shared with
+    any other page), and the page sees what the ear hears and what the agent does with it
+    ({"type": "agent", "event": ...}). The page's {"type": "mute", "on", "barge"} mutes the ear
+    while the page speaks through the robot; {"type": "off"} switches the mic off for every
+    page. The last message is always {"type": "error", "error": why}."""
     await ws.accept()
-    final = {"type": "error", "error": "the robot's microphone stream ended"}
-    _stop_ears(robot, "another page took the robot's microphone")
-    stop = asyncio.Event()
-    _ears.setdefault(robot, {})[stop] = ""
+    ear = _ear_for(robot)
+    q = ear.subscribe()
+    ear.hold("page")
+    mute_key = f"page:{id(ws)}"
+
+    async def to_page() -> None:
+        while True:
+            event = await q.get()
+            await ws.send_text(json.dumps(event, ensure_ascii=False))
+            if event.get("type") == "error":
+                return
+
+    async def from_page() -> None:
+        while True:
+            msg = await ws.receive()
+            if msg.get("type") == "websocket.disconnect":
+                return
+            try:
+                control = json.loads(msg.get("text") or "")
+            except ValueError:
+                continue
+            if isinstance(control, dict) and control.get("type") == "mute":
+                await ear.mute(mute_key, bool(control.get("on")), bool(control.get("barge")))
+            elif isinstance(control, dict) and control.get("type") == "off":
+                await ear.off("the robot's microphone was switched off")
+
+    tasks = {asyncio.create_task(to_page()), asyncio.create_task(from_page())}
     try:
-        async with (
-            httpx.AsyncClient(timeout=EAR_TIMEOUT) as ec,
-            ec.stream("GET", f"{EXECUTOR_URL}/audio/mic/stream", params={"robot": robot}) as r,
-        ):
-            if r.status_code != 200:
-                raw = (await r.aread())[:500]
-                try:
-                    detail = json.loads(raw).get("error") or raw.decode("utf-8", "replace")
-                except ValueError:
-                    detail = raw.decode("utf-8", "replace")
-                final = {"type": "error", "error": detail, "status": r.status_code}
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for t in tasks:
+            t.cancel()
+        ear.unsubscribe(q)
+        await ear.mute(mute_key, False)
+        if not ear.subs:                     # the last page watching left: the switch is off
+            await ear.release("page")
+        with contextlib.suppress(RuntimeError, WebSocketDisconnect):
+            await ws.close()
+
+
+# --------------------------------------------------------------------------- #
+# "Bender, ..." -> the agent (2026-11-12). The robot's name, heard by its own microphone, is
+# always an instruction for the agent (iacore /agent), whoever said it and whatever page is
+# open: the agent answers (look) or acts (navigate, command). A new one TAKES OVER: the running
+# instruction is stopped and any walk cancelled, so "Bender, no podés pasar, date la vuelta"
+# works while a walk waits for the way. The reply is spoken through the robot's speaker, the
+# ear muted meanwhile so it does not hear itself. Anyone near the robot is obeyed for now; who
+# may command it is still open (.claude/roadmap/G1.md).
+# --------------------------------------------------------------------------- #
+WAKE_ACK = "¿Sí?"
+AGENT_TAKEOVER_S = 10.0       # how long a running instruction may take to stop (an arm going home)
+_bender_runs: dict[str, asyncio.Task] = {}
+
+
+async def _say_on_robot(robot: str, text: str, ear: robot_ear.Ear | None = None) -> None:
+    """Speak `text` through the robot, with its ear muted for as long as it plays."""
+    resp = await _robot_say_wav(robot, text, None)
+    try:
+        seconds = float(json.loads(resp.body).get("seconds") or 0)
+    except (ValueError, TypeError, AttributeError):
+        seconds = 0.0
+    if ear is None or resp.status_code != 200 or seconds <= 0:
+        return
+    await ear.mute("robot", True, barge=True)
+    try:
+        await asyncio.sleep(seconds + 0.4)
+    finally:
+        await ear.mute("robot", False)
+
+
+async def _walk_control(robot: str, op: str) -> dict:
+    """The executor's /walk/control for one op; {} when it cannot be read."""
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(3.0)) as wc:
+            r = await wc.post(f"{EXECUTOR_URL}/walk/control", params={"robot": robot},
+                              json={"op": op})
+        out = r.json()
+        return out if isinstance(out, dict) else {}
+    except Exception:
+        return {}
+
+
+async def _bender_called(robot: str) -> None:
+    """Only its name: it answers, and the next phrase is the instruction (iacore's ear)."""
+    await _say_on_robot(robot, WAKE_ACK, _ear_for(robot))
+
+
+async def _bender_heard(robot: str, text: str) -> None:
+    old = _bender_runs.get(robot)
+    _bender_runs[robot] = asyncio.create_task(_bender_run(robot, text, old))
+
+
+def bender_instruction(text: str, walk: dict) -> str:
+    """What the agent is told: what was said, and — if the robot was walking — that the walk
+    is stopped and whether the speaker was in its way."""
+    if walk.get("state") not in ("starting", "running"):
+        return text
+    if walk.get("blocked"):
+        return (f"{text}\n(Context: you were walking somewhere and this person was blocking "
+                f"your way; that walk is stopped now.)")
+    return f"{text}\n(Context: you were walking somewhere; that walk is stopped now.)"
+
+
+async def _bender_run(robot: str, text: str, old: asyncio.Task | None) -> None:
+    ear = _ear_for(robot)
+    walk = (await _walk_control(robot, "status")).get("walk") or {}
+    instruction = bender_instruction(text, walk)
+    if instruction != text:
+        await _walk_control(robot, "cancel")
+    ear.publish({"type": "agent", "event": {"type": "heard", "text": text}})
+    deadline = time.monotonic() + AGENT_TAKEOVER_S
+    try:
+        while True:
+            async with client.stream("POST", "/agent", json={"text": instruction[:1000]}) as r:
+                if r.status_code == 409 and time.monotonic() < deadline:
+                    await client.post("/agent/stop")          # the new instruction takes over
+                    if old is not None:
+                        old.cancel()
+                        old = None
+                    await asyncio.sleep(0.3)
+                    continue
+                if r.status_code != 200:
+                    ear.publish({"type": "agent", "event": {
+                        "type": "error", "text": f"iacore {r.status_code}"}})
+                    return
+                async for line in r.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    try:
+                        event = json.loads(line[6:])
+                    except ValueError:
+                        continue
+                    if not isinstance(event, dict) or event.get("type") == "heard":
+                        continue                 # "heard" carries the context: not what was said
+                    ear.publish({"type": "agent", "event": event})
+                    if event.get("type") == "reply" and event.get("text"):
+                        await _say_on_robot(robot, str(event["text"]), ear)
                 return
-            try:
-                ear_cm = _ear_connect()
-                ear = await ear_cm.__aenter__()
-            except Exception as e:
-                final = {"type": "error", "error": f"speech-to-text (iacore) unreachable: {e}"}
-                return
-            try:
-                await ws.send_text(json.dumps({"type": "listening", "robot": robot}))
-                left = asyncio.Event()
-
-                async def mic_to_ear() -> None:
-                    async for chunk in r.aiter_bytes():
-                        await ear.send(chunk)
-
-                async def ear_to_browser() -> None:
-                    async for msg in ear:
-                        await ws.send_text(msg if isinstance(msg, str) else msg.decode())
-
-                async def browser_to_ear() -> None:
-                    while True:
-                        msg = await ws.receive()
-                        if msg.get("type") == "websocket.disconnect":
-                            left.set()
-                            return
-                        try:
-                            control = json.loads(msg.get("text") or "")
-                        except ValueError:
-                            continue
-                        if isinstance(control, dict) and control.get("type") == "mute":
-                            await ear.send(json.dumps({"type": "mute",
-                                                       "on": bool(control.get("on")),
-                                                       "barge": bool(control.get("barge"))}))
-                        elif isinstance(control, dict) and control.get("type") == "off":
-                            _stop_ears(robot, "the robot's microphone was switched off")
-                            return
-
-                tasks = {asyncio.create_task(mic_to_ear()),
-                         asyncio.create_task(ear_to_browser()),
-                         asyncio.create_task(browser_to_ear()),
-                         asyncio.create_task(stop.wait())}
-                done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-                for t in pending:
-                    t.cancel()
-                for t in done:
-                    if not left.is_set() and not t.cancelled() and t.exception() is not None:
-                        final = {"type": "error", "error": f"the robot's ear stopped: "
-                                                           f"{t.exception()}"}
-                if stop.is_set():
-                    final = {"type": "error", "error": _ears.get(robot, {}).get(stop) or
-                             "the robot's microphone was switched off"}
-            finally:
-                await ear_cm.__aexit__(None, None, None)
     except asyncio.CancelledError:
         raise
     except Exception as e:
-        final = {"type": "error", "error": f"robot executor unreachable: {e}"}
-    finally:
-        _ears.get(robot, {}).pop(stop, None)
-        try:
-            await ws.send_text(json.dumps(final))
-            await ws.close()
-        except (RuntimeError, WebSocketDisconnect):
-            pass        # the browser already left: nobody to tell
+        logger.warning("Bender -> agent failed: %s", e)
+        ear.publish({"type": "agent", "event": {"type": "error",
+                                                "text": f"iacore unreachable: {e}"}})
+
+
+# A walk that someone blocks opens the ear, and keeps it open EAR_AFTER_BLOCKED_S after, so the
+# person in the way can say "Bender, ..."; the robot has already asked for the way out loud
+# (g1_nav relay_bridge). One status read a second on the executor, only for robots with a mic.
+# 0 = no watch (the tests).
+WALK_WATCH_S = float(os.environ.get("EAR_WALK_WATCH_SECONDS", "1.0"))
+EAR_AFTER_BLOCKED_S = 10.0
+EAR_ROBOTS = ("g1",)
+
+
+def blocked_hold(walk: dict, now: float, last_blocked: float | None):
+    """(hold the ear?, when it was last seen blocked) after one look at the walk's status."""
+    if walk.get("state") in ("starting", "running") and walk.get("blocked"):
+        return True, now
+    if last_blocked is not None and now - last_blocked < EAR_AFTER_BLOCKED_S:
+        return True, last_blocked
+    return False, None
+
+
+async def _watch_walks() -> None:
+    """Holds and releases on the CHANGES only: an ear that fails (no mic) is not reopened every
+    second, only at the next blocked spell."""
+    last: dict[str, float | None] = {}
+    holding: dict[str, bool] = {}
+    while True:
+        for robot in EAR_ROBOTS:
+            walk = (await _walk_control(robot, "status")).get("walk") or {}
+            hold, last[robot] = blocked_hold(walk, time.monotonic(), last.get(robot))
+            if hold and not holding.get(robot):
+                _ear_for(robot).hold("blocked")
+            elif not hold and holding.get(robot):
+                await _ear_for(robot).release("blocked")
+            holding[robot] = hold
+        await asyncio.sleep(WALK_WATCH_S)
 
 
 # --------------------------------------------------------------------------- #

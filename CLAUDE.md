@@ -19,6 +19,8 @@ password resets), `sso.py` (single sign-on through the company's identity provid
 Microsoft Entra, Google or any other; only invited people get in, the password stays as the
 fallback), `fleet.py` (sites, floor plans, robots), `robot_watch.py` (a background
 loop that keeps each robot's last known state: online since, last seen, latency, battery),
+`robot_ear.py` (the G1's own microphone, held by the gateway: pages watch it, a blocked walk
+opens it, and "Bender, ..." goes to the agent),
 `chats.py` (the vision assistant's conversations, private to each person), `backup.py` (a
 dated copy of PILOT_DATA_DIR every day, the last few kept), `db.py` (SQLite via SQLAlchemy) and `migrations/` (Alembic, applied on startup). **Every new route needs a `POLICY` entry** or it
 is refused; `tests/test_auth.py` fails until it has one. It is more than a plain
