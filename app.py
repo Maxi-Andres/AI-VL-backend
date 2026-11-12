@@ -1788,8 +1788,8 @@ async def _bender_run(robot: str, text: str, old: asyncio.Task | None) -> None:
                         event = json.loads(line[6:])
                     except ValueError:
                         continue
-                    if not isinstance(event, dict) or event.get("type") == "heard":
-                        continue                 # "heard" carries the context: not what was said
+                    if not isinstance(event, dict) or event.get("type") in (None, "heard"):
+                        continue        # SSE's closing {} / "heard" carries the context, not the words
                     ear.publish({"type": "agent", "event": event})
                     if event.get("type") == "reply" and event.get("text"):
                         await _say_on_robot(robot, str(event["text"]), ear)
@@ -1800,6 +1800,8 @@ async def _bender_run(robot: str, text: str, old: asyncio.Task | None) -> None:
         logger.warning("Bender -> agent failed: %s", e)
         ear.publish({"type": "agent", "event": {"type": "error",
                                                 "text": f"iacore unreachable: {e}"}})
+    finally:
+        ear.publish({"type": "agent", "event": {"type": "end"}})    # the page closes the turn
 
 
 # A walk that someone blocks opens the ear, and keeps it open EAR_AFTER_BLOCKED_S after, so the

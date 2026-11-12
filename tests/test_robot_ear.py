@@ -317,11 +317,11 @@ def bender_ear(monkeypatch):
 def test_bender_goes_to_the_agent_and_the_robot_says_its_reply(executor, iacore, bender_ear):
     with TestClient(gateway.app) as tc, tc.websocket_connect("/ws/robot-ear?robot=g1") as ws:
         assert recv(ws)["type"] == "listening"
-        events = agent_events(ws)
+        events = agent_events(ws, until="end")
         deadline = time.time() + 3
         while not executor.said and time.time() < deadline:
             time.sleep(0.02)
-    assert [e["type"] for e in events] == ["heard", "tool", "reply"]
+    assert [e["type"] for e in events] == ["heard", "tool", "reply", "end"]   # end: the page closes the turn
     assert events[0]["text"] == "no podés pasar, date la vuelta"
     assert ("/agent", {"text": "no podés pasar, date la vuelta"}) in iacore.asked
     assert ("/speak", {"text": "Listo, me doy la vuelta.", "voice": None}) in iacore.asked
