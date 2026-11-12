@@ -464,3 +464,18 @@ def test_a_tool_use_is_told_in_one_line():
     assert gateway.agent_done("pick", {"object": "botella"}, {"ok": True}) == 'pick({"object": "botella"}) -> ok'
     assert gateway.agent_done("navigate", {}, {"ok": False, "error": "blocked"}) == "navigate({}) -> failed: blocked"
     assert gateway.agent_done("look", {}, {"ok": True, "answer": "on the table"}) == "look({}) -> ok: on the table"
+
+
+def test_every_event_of_a_bender_run_carries_its_run_number(executor, iacore, bender_ear):
+    """Defect: a run taken over ends after the new one started; unnumbered, its "end" closed
+    the new run's turn on the page."""
+    runs = []
+    with TestClient(gateway.app) as tc, tc.websocket_connect("/ws/robot-ear?robot=g1") as ws:
+        recv(ws)
+        for _ in range(12):
+            msg = recv(ws)
+            if msg.get("type") == "agent":
+                runs.append(msg.get("run"))
+                if msg["event"]["type"] == "end":
+                    break
+    assert len(runs) >= 3 and len(set(runs)) == 1 and isinstance(runs[0], int)

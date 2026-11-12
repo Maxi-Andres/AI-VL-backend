@@ -33,6 +33,7 @@ Run (from the backend repo root, venv active):
 """
 import asyncio
 import contextlib
+import itertools
 import json
 import logging
 import os
@@ -1745,6 +1746,7 @@ async def _say_mode(robot: str, mode: str) -> None:
     await _say_on_robot(robot, EAR_MODE_SAID[mode], _ear_for(robot))
 AGENT_TAKEOVER_S = 10.0       # how long a running instruction may take to stop (an arm going home)
 _bender_runs: dict[str, asyncio.Task] = {}
+_bender_run_ids = itertools.count(1)
 
 
 async def _say_on_robot(robot: str, text: str, ear: robot_ear.Ear | None = None) -> None:
@@ -1798,11 +1800,15 @@ def bender_instruction(text: str, walk: dict) -> str:
 
 async def _bender_run(robot: str, text: str, old: asyncio.Task | None) -> None:
     ear = _ear_for(robot)
+    # Every event of this run carries its number: a run taken over ends AFTER the new one has
+    # started, and its "end" closed the new one's turn on the page (2026-11-12, "Ya, estate
+    # quieto" went unanswered while the old walk's line kept counting).
+    run = next(_bender_run_ids)
     walk = (await _walk_control(robot, "status")).get("walk") or {}
     instruction = bender_instruction(text, walk)
     if instruction != text:
         await _walk_control(robot, "cancel")
-    ear.publish({"type": "agent", "event": {"type": "heard", "text": text}})
+    ear.publish({"type": "agent", "run": run, "event": {"type": "heard", "text": text}})
     deadline = time.monotonic() + AGENT_TAKEOVER_S
     history = bender_history(robot, time.monotonic())
     done: list[str] = []
@@ -1820,7 +1826,7 @@ async def _bender_run(robot: str, text: str, old: asyncio.Task | None) -> None:
                     await asyncio.sleep(0.3)
                     continue
                 if r.status_code != 200:
-                    ear.publish({"type": "agent", "event": {
+                    ear.publish({"type": "agent", "run": run, "event": {
                         "type": "error", "text": f"iacore {r.status_code}"}})
                     return
                 async for line in r.aiter_lines():
@@ -1832,7 +1838,7 @@ async def _bender_run(robot: str, text: str, old: asyncio.Task | None) -> None:
                         continue
                     if not isinstance(event, dict) or event.get("type") in (None, "heard"):
                         continue        # SSE's closing {} / "heard" carries the context, not the words
-                    ear.publish({"type": "agent", "event": event})
+                    ear.publish({"type": "agent", "run": run, "event": event})
                     if event.get("type") == "tool":
                         args_of[str(event.get("tool"))] = event.get("args") or {}
                     elif event.get("type") == "tool_result":
@@ -1847,13 +1853,13 @@ async def _bender_run(robot: str, text: str, old: asyncio.Task | None) -> None:
         raise
     except Exception as e:
         logger.warning("Bender -> agent failed: %s", e)
-        ear.publish({"type": "agent", "event": {"type": "error",
+        ear.publish({"type": "agent", "run": run, "event": {"type": "error",
                                                 "text": f"iacore unreachable: {e}"}})
     finally:
         if reply or done:            # taken over midway too: what it did still counts
             bender_remember(robot, {"question": text[:1000], "answer": reply[:4000],
                                     "done": done[-12:]}, time.monotonic())
-        ear.publish({"type": "agent", "event": {"type": "end"}})    # the page closes the turn
+        ear.publish({"type": "agent", "run": run, "event": {"type": "end"}})    # the page closes the turn
 
 
 # A walk that someone blocks opens the ear, and keeps it open EAR_AFTER_BLOCKED_S after, so the
