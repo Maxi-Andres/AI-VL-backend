@@ -311,6 +311,8 @@ def agent_events(ws, until="reply", n=12):
 def bender_ear(monkeypatch):
     fake = FakeEar([{"type": "command", "text": "no podés pasar, date la vuelta"}])
     monkeypatch.setattr(gateway, "_ear_connect", lambda: fake)
+    monkeypatch.setattr(gateway, "_bender_memory", {})
+    monkeypatch.setattr(gateway, "_bender_memory_at", {})
     return fake
 
 
@@ -323,7 +325,7 @@ def test_bender_goes_to_the_agent_and_the_robot_says_its_reply(executor, iacore,
             time.sleep(0.02)
     assert [e["type"] for e in events] == ["heard", "tool", "reply", "end"]   # end: the page closes the turn
     assert events[0]["text"] == "no podés pasar, date la vuelta"
-    assert ("/agent", {"text": "no podés pasar, date la vuelta"}) in iacore.asked
+    assert ("/agent", {"text": "no podés pasar, date la vuelta", "history": []}) in iacore.asked
     assert ("/speak", {"text": "Listo, me doy la vuelta.", "voice": None}) in iacore.asked
     assert executor.said, "the reply is spoken through the robot"
     assert "cancel" not in executor.walk_ops                  # it was not walking
@@ -428,3 +430,37 @@ def test_walking_is_always_the_agents_even_with_the_mic_in_vlm(executor, iacore,
     assert "Modo agente." in spoken(iacore)
     asked = [b["text"] for p, b in iacore.asked if p == "/agent"]
     assert asked and "walking somewhere" in asked[-1]
+
+
+def test_bender_remembers_what_it_was_told_and_did(executor, iacore, bender_ear):
+    """Defect: every "Bender, ..." ran alone, so "dejala en la mesa" did not know what "la" was."""
+    earlier = {"question": "agarrá la botella", "answer": "Listo.",
+               "done": ['pick({"object": "botella"}) -> ok']}
+    gateway.bender_remember("g1", earlier, time.monotonic())
+    with TestClient(gateway.app) as tc, tc.websocket_connect("/ws/robot-ear?robot=g1") as ws:
+        recv(ws)
+        agent_events(ws, until="end")
+    sent = [b for p, b in iacore.asked if p == "/agent"][-1]
+    assert sent["history"] == [earlier]
+    deadline = time.time() + 2
+    while len(gateway.bender_history("g1", time.monotonic())) < 2 and time.time() < deadline:
+        time.sleep(0.02)
+    now = gateway.bender_history("g1", time.monotonic())[-1]
+    assert now == {"question": "no podés pasar, date la vuelta", "answer": "Listo, me doy la vuelta.",
+                   "done": []}            # the fake's navigate never reported a result
+
+
+def test_bender_memory_is_short_and_forgets_after_a_quiet_while(monkeypatch):
+    monkeypatch.setattr(gateway, "_bender_memory", {})
+    monkeypatch.setattr(gateway, "_bender_memory_at", {})
+    for i in range(gateway.BENDER_MEMORY_TURNS + 3):
+        gateway.bender_remember("g1", {"question": f"q{i}"}, 100.0)
+    kept = gateway.bender_history("g1", 100.0)
+    assert len(kept) == gateway.BENDER_MEMORY_TURNS and kept[-1]["question"] == f"q{i}"
+    assert gateway.bender_history("g1", 100.0 + gateway.BENDER_MEMORY_S + 1) == []
+
+
+def test_a_tool_use_is_told_in_one_line():
+    assert gateway.agent_done("pick", {"object": "botella"}, {"ok": True}) == 'pick({"object": "botella"}) -> ok'
+    assert gateway.agent_done("navigate", {}, {"ok": False, "error": "blocked"}) == "navigate({}) -> failed: blocked"
+    assert gateway.agent_done("look", {}, {"ok": True, "answer": "on the table"}) == "look({}) -> ok: on the table"

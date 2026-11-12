@@ -75,7 +75,7 @@ def test_the_trace_is_relayed_event_by_event(iacore):
         assert r.headers["content-type"].startswith("text/event-stream")
         body = "".join(r.iter_text())
     assert [e["type"] for e in _events(body)] == ["heard", "tool", "reply"]
-    assert srv.asked == [("/agent", {"text": "agarrá la botella"})]
+    assert srv.asked == [("/agent", {"text": "agarrá la botella", "history": []})]
 
 
 def test_a_busy_robot_is_an_error_in_the_trace(iacore):
@@ -105,3 +105,11 @@ def test_stop_reaches_iacore(iacore):
 def test_an_empty_instruction_is_refused(iacore):
     tc, _srv = iacore
     assert tc.post("/api/agent", json={"text": ""}).status_code == 422
+
+
+def test_the_conversation_so_far_reaches_iacore(iacore):
+    """Defect: the gateway's model did not declare `history`, so pydantic dropped it silently."""
+    tc, srv = iacore
+    earlier = [{"question": "agarrá la botella", "answer": "Listo.", "done": ["pick({}) -> ok"]}]
+    tc.post("/api/agent", json={"text": "ahora dejala en la mesa", "history": earlier})
+    assert srv.asked[-1] == ("/agent", {"text": "ahora dejala en la mesa", "history": earlier})

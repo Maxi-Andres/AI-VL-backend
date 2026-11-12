@@ -39,13 +39,13 @@ import os
 import re
 import time
 from contextlib import asynccontextmanager
-from typing import Literal
+from typing import Annotated, Literal
 
 import httpx
 from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 from websockets.asyncio.client import connect as ws_connect
 
 import auth
@@ -479,8 +479,18 @@ async def execute(req: CommandExecuteRequest):
                             json=req.model_dump(exclude_none=True), read=20.0)
 
 
+class AgentTurn(BaseModel):
+    """An earlier turn of the agent's conversation: asked, done with its tools, answered."""
+    question: str = Field("", max_length=1000)
+    answer: str = Field("", max_length=4000)
+    done: list[Annotated[str, StringConstraints(max_length=300)]] = Field(default_factory=list,
+                                                                       max_length=12)
+
+
 class AgentRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=1000)
+    # The conversation so far, oldest first (iacore sends the newest that fit to the model).
+    history: list[AgentTurn] = Field(default_factory=list, max_length=50)
 
 
 @app.post("/api/agent")
@@ -1701,6 +1711,33 @@ async def ws_robot_ear(ws: WebSocket, robot: str = "g1", mode: str = ""):
 # may command it is still open (.claude/roadmap/G1.md).
 # --------------------------------------------------------------------------- #
 WAKE_ACK = "¿Sí?"
+# What Bender was told lately, per robot, so "Bender, dejala en la mesa" knows what "la" is (the
+# page's own turns go from the page). In memory only: forgotten after a quiet while or a restart.
+BENDER_MEMORY_TURNS = 10
+BENDER_MEMORY_S = 15 * 60
+_bender_memory: dict[str, list[dict]] = {}
+_bender_memory_at: dict[str, float] = {}
+
+
+def agent_done(tool: str, args: dict, result: dict) -> str:
+    """One tool use, as an earlier turn tells it to the model: "pick({...}) -> ok"."""
+    if not result.get("ok"):
+        how = f"failed: {result.get('error') or 'no reason'}"
+    else:                                         # what `look` saw is worth keeping
+        how = f"ok: {result['answer']}" if result.get("answer") else "ok"
+    return f"{tool}({json.dumps(args, ensure_ascii=False)}) -> {how}"[:300]
+
+
+def bender_history(robot: str, now: float) -> list[dict]:
+    if now - _bender_memory_at.get(robot, now) > BENDER_MEMORY_S:
+        _bender_memory.pop(robot, None)
+    return list(_bender_memory.get(robot, []))
+
+
+def bender_remember(robot: str, turn: dict, now: float) -> None:
+    turns = [*bender_history(robot, now), turn][-BENDER_MEMORY_TURNS:]
+    _bender_memory[robot] = turns
+    _bender_memory_at[robot] = now
 EAR_MODE_SAID = {"vlm": "Modo VLM.", "agent": "Modo agente."}    # what the robot says
 
 
@@ -1767,9 +1804,14 @@ async def _bender_run(robot: str, text: str, old: asyncio.Task | None) -> None:
         await _walk_control(robot, "cancel")
     ear.publish({"type": "agent", "event": {"type": "heard", "text": text}})
     deadline = time.monotonic() + AGENT_TAKEOVER_S
+    history = bender_history(robot, time.monotonic())
+    done: list[str] = []
+    args_of: dict[str, dict] = {}
+    reply = ""
     try:
         while True:
-            async with client.stream("POST", "/agent", json={"text": instruction[:1000]}) as r:
+            async with client.stream("POST", "/agent", json={"text": instruction[:1000],
+                                                             "history": history}) as r:
                 if r.status_code == 409 and time.monotonic() < deadline:
                     await client.post("/agent/stop")          # the new instruction takes over
                     if old is not None:
@@ -1791,8 +1833,15 @@ async def _bender_run(robot: str, text: str, old: asyncio.Task | None) -> None:
                     if not isinstance(event, dict) or event.get("type") in (None, "heard"):
                         continue        # SSE's closing {} / "heard" carries the context, not the words
                     ear.publish({"type": "agent", "event": event})
-                    if event.get("type") == "reply" and event.get("text"):
-                        await _say_on_robot(robot, str(event["text"]), ear)
+                    if event.get("type") == "tool":
+                        args_of[str(event.get("tool"))] = event.get("args") or {}
+                    elif event.get("type") == "tool_result":
+                        tool = str(event.get("tool"))
+                        done.append(agent_done(tool, args_of.pop(tool, {}),
+                                               event.get("result") or {}))
+                    elif event.get("type") == "reply" and event.get("text"):
+                        reply = str(event["text"])
+                        await _say_on_robot(robot, reply, ear)
                 return
     except asyncio.CancelledError:
         raise
@@ -1801,6 +1850,9 @@ async def _bender_run(robot: str, text: str, old: asyncio.Task | None) -> None:
         ear.publish({"type": "agent", "event": {"type": "error",
                                                 "text": f"iacore unreachable: {e}"}})
     finally:
+        if reply or done:            # taken over midway too: what it did still counts
+            bender_remember(robot, {"question": text[:1000], "answer": reply[:4000],
+                                    "done": done[-12:]}, time.monotonic())
         ear.publish({"type": "agent", "event": {"type": "end"}})    # the page closes the turn
 
 

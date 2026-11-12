@@ -53,7 +53,8 @@ CONTRACT = {
     "VlmStreamRequest": ["image", "prompt", "model", "max_tokens", "num_ctx", "robot", "history",
                          "robot_state", "robot_notes", "keep"],
     "SpeakRequest": ["text", "voice"],
-    "AgentRequest": ["text"],
+    "AgentRequest": ["text", "history"],
+    "AgentTurn": ["question", "answer", "done"],
     "CommandRequest": ["text", "image", "model", "robot", "num_ctx", "max_tokens"],
 }
 
