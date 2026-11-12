@@ -325,7 +325,8 @@ def test_bender_goes_to_the_agent_and_the_robot_says_its_reply(executor, iacore,
             time.sleep(0.02)
     assert [e["type"] for e in events] == ["heard", "tool", "reply", "end"]   # end: the page closes the turn
     assert events[0]["text"] == "no podés pasar, date la vuelta"
-    assert ("/agent", {"text": "no podés pasar, date la vuelta", "history": []}) in iacore.asked
+    sent = [b for p, b in iacore.asked if p == "/agent"]
+    assert sent and sent[0]["text"] == "no podés pasar, date la vuelta" and sent[0]["history"] == []
     assert ("/speak", {"text": "Listo, me doy la vuelta.", "voice": None}) in iacore.asked
     assert executor.said, "the reply is spoken through the robot"
     assert "cancel" not in executor.walk_ops                  # it was not walking

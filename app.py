@@ -492,22 +492,76 @@ class AgentRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=1000)
     # The conversation so far, oldest first (iacore sends the newest that fit to the model).
     history: list[AgentTurn] = Field(default_factory=list, max_length=50)
+    # Set HERE, never by the page, as for the vision chat: the robot's notes and state.
+    robot_notes: list[str] | None = Field(default=None, exclude=True)
+    robot_state: dict | None = Field(default=None, exclude=True)
+
+
+AGENT_ROBOT = "g1"            # the agent's tools drive the G1 (iacore agent_common)
+
+
+async def agent_context(org_id: str | None) -> dict:
+    """What the agent is told besides the instruction, as the vision chat is: the robot's notes
+    and its state (battery, link)."""
+    if not org_id:
+        return {}
+    out: dict = {}
+    if state := await robot_watch.state(org_id, AGENT_ROBOT):
+        out["robot_state"] = state
+    if notes := await memory.notes(org_id, AGENT_ROBOT):
+        out["robot_notes"] = notes
+    return out
+
+
+async def agent_keep(event: dict, org_id: str | None, me=None) -> dict:
+    """iacore's "keep" event (the agent's `remember`) -> kept in the robot's Memory, and the
+    trace line that says so (the picture never goes on to the page)."""
+    try:
+        if not org_id:
+            raise ValueError("no robot in the fleet to keep it for")
+        kept = await memory.keep_for_agent(org_id, AGENT_ROBOT, str(event.get("note") or ""),
+                                           str(event.get("image") or ""), me=me)
+        return {"type": "tool_event", "tool": "remember", "step": f"kept a {kept}",
+                "detail": str(event.get("note") or "")[:200]}
+    except Exception as e:
+        logger.warning("agent keep failed: %s", e)
+        return {"type": "error", "text": f"not kept: {e}"[:300]}
+
+
+async def agent_events(lines, org_id: str | None, me=None):
+    """iacore's /agent stream, line by line, with its "keep" events done here: every other line
+    goes on unchanged."""
+    async for line in lines:
+        if line.startswith("data: {") and '"type": "keep"' in line:
+            try:
+                event = json.loads(line[6:])
+            except ValueError:
+                event = None
+            if isinstance(event, dict) and event.get("type") == "keep":
+                yield _sse(await agent_keep(event, org_id, me))
+                continue
+        yield (line + "\n").encode()
 
 
 @app.post("/api/agent")
-async def agent(req: AgentRequest):
+async def agent(req: AgentRequest, request: Request):
     """The /agent tab: iacore carries the instruction out with the robot's tools and streams
-    the trace (Server-Sent Events, one JSON event per line). Relayed unchanged as it comes;
-    iacore unreachable is an SSE error event, so the tab shows it in the trace."""
+    the trace (Server-Sent Events, one JSON event per line). Relayed as it comes, but for
+    what the agent asked to keep (agent_events); iacore unreachable is an SSE error event, so
+    the tab shows it in the trace."""
+    me = request.scope.get("principal")
+    org_id = me.org_id if me is not None else None
+    body = {**req.model_dump(), **await agent_context(org_id)}
+
     async def gen():
         try:
-            async with client.stream("POST", "/agent", json=req.model_dump()) as r:
+            async with client.stream("POST", "/agent", json=body) as r:
                 if r.status_code != 200:
                     detail = (await r.aread())[:300].decode("utf-8", "replace")
                     yield _sse({"type": "error", "text": f"iacore {r.status_code}: {detail}"})
                     yield b"event: end\ndata: {}\n\n"
                     return
-                async for chunk in r.aiter_bytes():
+                async for chunk in agent_events(r.aiter_lines(), org_id, me):
                     yield chunk
         except Exception as e:
             logger.warning("iacore /agent failed: %s", e)
@@ -1811,13 +1865,16 @@ async def _bender_run(robot: str, text: str, old: asyncio.Task | None) -> None:
     ear.publish({"type": "agent", "run": run, "event": {"type": "heard", "text": text}})
     deadline = time.monotonic() + AGENT_TAKEOVER_S
     history = bender_history(robot, time.monotonic())
+    org_id = await memory.org_of_slot(robot)
+    context = await agent_context(org_id)
     done: list[str] = []
     args_of: dict[str, dict] = {}
     reply = ""
     try:
         while True:
             async with client.stream("POST", "/agent", json={"text": instruction[:1000],
-                                                             "history": history}) as r:
+                                                             "history": history,
+                                                             **context}) as r:
                 if r.status_code == 409 and time.monotonic() < deadline:
                     await client.post("/agent/stop")          # the new instruction takes over
                     if old is not None:
@@ -1838,6 +1895,8 @@ async def _bender_run(robot: str, text: str, old: asyncio.Task | None) -> None:
                         continue
                     if not isinstance(event, dict) or event.get("type") in (None, "heard"):
                         continue        # SSE's closing {} / "heard" carries the context, not the words
+                    if event.get("type") == "keep":          # the agent's `remember`
+                        event = await agent_keep(event, org_id)
                     ear.publish({"type": "agent", "run": run, "event": event})
                     if event.get("type") == "tool":
                         args_of[str(event.get("tool"))] = event.get("args") or {}

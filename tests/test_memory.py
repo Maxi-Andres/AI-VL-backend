@@ -247,3 +247,32 @@ def test_an_iacore_without_the_mark_is_answered_as_before(tc, iacore, monkeypatc
     assert tc.post("/api/vlm/stream", json={"image": base64.b64encode(JPEG).decode(),
                                             "prompt": "Guardá esta imagen", "robot": "g1"}).text == \
         "Listo, guardé la imagen en mi memoria."
+
+
+def test_the_agent_remembers_into_the_same_memory_and_is_told_the_notes(tc, monkeypatch):
+    """The agent's `remember` (iacore's "keep" event) is kept here, in the robot's Memory; the
+    picture never goes on to the page; and the agent gets the robot's notes, as the chat does."""
+    _robot(tc)
+    tc.post("/api/memory", json={"robot": "g1", "kind": "note", "text": "el código es 4455"})
+    frame = base64.b64encode(JPEG).decode()
+    sent = []
+
+    def handle(req: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(req.content))
+        events = [{"type": "tool", "tool": "remember", "args": {"picture": True}},
+                  {"type": "keep", "note": "la caja roja está en la mesa", "image": frame},
+                  {"type": "tool_result", "tool": "remember", "result": {"ok": True}},
+                  {"type": "reply", "text": "Listo."}]
+        body = "".join(f"data: {json.dumps(e)}\n\n" for e in events) + "event: end\ndata: {}\n\n"
+        return httpx.Response(200, content=body.encode(), headers={"content-type": "text/event-stream"})
+
+    monkeypatch.setattr(gateway, "client", httpx.AsyncClient(
+        base_url="http://iacore.test", transport=httpx.MockTransport(handle)))
+    r = tc.post("/api/agent", json={"text": "sacale una foto a la caja y acordate dónde está"})
+    out = [json.loads(ln[6:]) for ln in r.text.splitlines() if ln.startswith("data: {\"")]
+    assert [e["type"] for e in out] == ["tool", "tool_event", "tool_result", "reply"]
+    assert out[1]["step"] == "kept a picture" and frame not in r.text
+    assert "el código es 4455" in sent[0]["robot_notes"]
+    top = tc.get("/api/memory", params={"robot": "g1"}).json()["items"][0]
+    assert (top["kind"], top["text"]) == ("image", "la caja roja está en la mesa")
+    assert tc.get(f"/api/memory/{top['id']}/image").content == JPEG

@@ -159,10 +159,12 @@ async def _robot(s, org_id: str, slot: str) -> db.Robot | None:
                                                    db.Robot.slot == slot))).scalars().first()
 
 
-async def _keep(me: auth.Principal, robot: db.Robot, kind: str, text: str = "",
-                image: bytes | None = None) -> db.Memory:
-    item = db.Memory(org_id=me.org_id, robot_id=robot.id, kind=kind, text=text[:NOTE_CHARS],
-                     created_by=me.user_id, created_by_name=(me.name or me.email or "")[:120])
+async def _keep(me: auth.Principal | None, robot: db.Robot, kind: str, text: str = "",
+                image: bytes | None = None, by_name: str = "") -> db.Memory:
+    """`me` None: nobody signed in asked (the agent, on "Bender, …" heard by the robot)."""
+    item = db.Memory(org_id=robot.org_id, robot_id=robot.id, kind=kind, text=text[:NOTE_CHARS],
+                     created_by=me.user_id if me else None,
+                     created_by_name=((me.name or me.email or "") if me else by_name)[:120])
     async with db.SessionLocal() as s:
         s.add(item)
         await s.flush()
@@ -204,6 +206,38 @@ async def handle(conn: HTTPConnection, slot: str | None, cmd: tuple[str, str], i
     await _keep(me, robot, "note", text=note)
     await auth.audit(conn, "memory.save", target=robot.name, detail={"kind": "note"})
     return _reply("note", spanish, note)
+
+
+async def org_of_slot(slot: str) -> str | None:
+    """The company whose robot is in `slot`, for what the robot's own ear hears ("Bender, …"):
+    it has no account behind it. One company per gateway today; with more, this needs the
+    robot's own identity."""
+    async with db.SessionLocal() as s:
+        robot = (await s.execute(select(db.Robot).where(db.Robot.slot == slot)
+                                 .order_by(db.Robot.created_at))).scalars().first()
+    return robot.org_id if robot else None
+
+
+async def keep_for_agent(org_id: str, slot: str, note: str, image_b64: str = "",
+                         me: auth.Principal | None = None) -> str:
+    """What the agent's `remember` tool asked to keep (iacore's "keep" event): a note, a picture,
+    or a picture with its note as the caption. `me`: who gave the instruction; None for one
+    the robot heard ("Bender, …"), then signed "Bender". Returns what was kept ("note" /
+    "picture"); raises ValueError when it cannot."""
+    raw = None
+    if image_b64:
+        raw = _image_bytes(image_b64)
+        if raw is None:
+            raise ValueError("not a JPEG or PNG picture, or too big")
+    note = " ".join(note.split())[:NOTE_CHARS]
+    if raw is None and not note:
+        raise ValueError("nothing to keep")
+    async with db.SessionLocal() as s:
+        robot = await _robot(s, org_id, slot)
+    if robot is None:
+        raise ValueError(f"no robot {slot!r} in the fleet")
+    await _keep(me, robot, "image" if raw else "note", text=note, image=raw, by_name="Bender")
+    return "picture" if raw else "note"
 
 
 async def notes(org_id: str, slot: str) -> list[str]:
