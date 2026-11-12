@@ -1630,20 +1630,26 @@ _EARS: dict[str, robot_ear.Ear] = {}
 def _ear_for(robot: str) -> robot_ear.Ear:
     if robot not in _EARS:
         _EARS[robot] = robot_ear.Ear(robot, lambda: EXECUTOR_URL, lambda: _ear_connect(),
-                                     on_command=_bender_heard, on_wake=_bender_called)
+                                     on_command=_bender_heard, on_wake=_bender_called,
+                                     on_mode=_say_mode)
     return _EARS[robot]
 
 
 @app.websocket("/ws/robot-ear")
-async def ws_robot_ear(ws: WebSocket, robot: str = "g1"):
+async def ws_robot_ear(ws: WebSocket, robot: str = "g1", mode: str = ""):
     """A page's robot-mic switch: while it is open the robot's microphone is on (shared with
     any other page), and the page sees what the ear hears and what the agent does with it
-    ({"type": "agent", "event": ...}). The page's {"type": "mute", "on", "barge"} mutes the ear
-    while the page speaks through the robot; {"type": "off"} switches the mic off for every
-    page. The last message is always {"type": "error", "error": why}."""
+    ({"type": "agent", "event": ...}). `mode` (here, then {"type": "mode", "mode": "vlm" |
+    "agent"} to change it) says who answers "Bender, ..." (robot_ear.py; while the robot walks
+    it is always the agent), and the robot says the mode out loud when it changes or the mic
+    comes on. The page's {"type": "mute", "on", "barge"} mutes the ear while the page
+    speaks through the robot; {"type": "off"} switches the mic off for every page. The last
+    message is always {"type": "error", "error": why}."""
     await ws.accept()
     ear = _ear_for(robot)
     q = ear.subscribe()
+    if mode in EAR_MODE_SAID:
+        ear.set_page_mode(mode)
     ear.hold("page")
     mute_key = f"page:{id(ws)}"
 
@@ -1665,6 +1671,9 @@ async def ws_robot_ear(ws: WebSocket, robot: str = "g1"):
                 continue
             if isinstance(control, dict) and control.get("type") == "mute":
                 await ear.mute(mute_key, bool(control.get("on")), bool(control.get("barge")))
+            elif (isinstance(control, dict) and control.get("type") == "mode"
+                  and control.get("mode") in EAR_MODE_SAID):
+                ear.set_page_mode(control["mode"])
             elif isinstance(control, dict) and control.get("type") == "off":
                 await ear.off("the robot's microphone was switched off")
 
@@ -1692,6 +1701,11 @@ async def ws_robot_ear(ws: WebSocket, robot: str = "g1"):
 # may command it is still open (.claude/roadmap/G1.md).
 # --------------------------------------------------------------------------- #
 WAKE_ACK = "¿Sí?"
+EAR_MODE_SAID = {"vlm": "Modo VLM.", "agent": "Modo agente."}    # what the robot says
+
+
+async def _say_mode(robot: str, mode: str) -> None:
+    await _say_on_robot(robot, EAR_MODE_SAID[mode], _ear_for(robot))
 AGENT_TAKEOVER_S = 10.0       # how long a running instruction may take to stop (an arm going home)
 _bender_runs: dict[str, asyncio.Task] = {}
 
@@ -1790,7 +1804,7 @@ async def _bender_run(robot: str, text: str, old: asyncio.Task | None) -> None:
 
 # A walk that someone blocks opens the ear, and keeps it open EAR_AFTER_BLOCKED_S after, so the
 # person in the way can say "Bender, ..."; the robot has already asked for the way out loud
-# (g1_nav relay_bridge). One status read a second on the executor, only for robots with a mic.
+# (g1_nav relay_bridge). Any walk puts the ear in the agent's mode while it lasts. One status read a second on the executor, only for robots with a mic.
 # 0 = no watch (the tests).
 WALK_WATCH_S = float(os.environ.get("EAR_WALK_WATCH_SECONDS", "1.0"))
 EAR_AFTER_BLOCKED_S = 10.0
@@ -1814,6 +1828,9 @@ async def _watch_walks() -> None:
     while True:
         for robot in EAR_ROBOTS:
             walk = (await _walk_control(robot, "status")).get("walk") or {}
+            walking = walk.get("state") in ("starting", "running")
+            if walking != _ear_for(robot).walking:
+                _ear_for(robot).set_walking(walking)         # walking: the agent's, said
             hold, last[robot] = blocked_hold(walk, time.monotonic(), last.get(robot))
             if hold and not holding.get(robot):
                 _ear_for(robot).hold("blocked")

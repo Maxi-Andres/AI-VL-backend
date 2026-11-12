@@ -138,20 +138,24 @@ def tc():
         yield client
 
 
-def recv(ws, timeout: float = 5.0) -> dict:
-    box: dict = {}
-    t = threading.Thread(target=lambda: box.update(msg=ws.receive_text()), daemon=True)
-    t.start()
-    t.join(timeout)
-    assert "msg" in box, f"no message within {timeout:.1f}s"
-    return json.loads(box["msg"])
+def recv(ws, timeout: float = 5.0, skip=("mode",)) -> dict:
+    """The next message, past the mode announcements (their own tests read them)."""
+    while True:
+        box: dict = {}
+        t = threading.Thread(target=lambda b=box: b.update(msg=ws.receive_text()), daemon=True)
+        t.start()
+        t.join(timeout)
+        assert "msg" in box, f"no message within {timeout:.1f}s"
+        msg = json.loads(box["msg"])
+        if msg.get("type") not in skip:
+            return msg
 
 
 def test_the_robots_audio_reaches_the_ear_and_its_events_reach_the_page(tc, executor, ear):
     with tc.websocket_connect("/ws/robot-ear?robot=g1") as ws:
         got = [recv(ws) for _ in range(4)]
     assert got[0] == {"type": "listening", "robot": "g1"}
-    assert got[-1] == {"type": "command", "text": "qué ves"}
+    assert got[-1] == {"type": "command", "text": "qué ves", "to": "agent"}
     assert ear.sent_bytes >= 3 * len(PACKET)
     assert executor.requests == ["/audio/mic/stream?robot=g1"]
     assert ear.to_agent == [("g1", "qué ves")]        # the agent answers it, not the page
@@ -368,3 +372,59 @@ def test_the_walk_watch_opens_the_ear_with_no_page_open(executor, quiet_ears, mo
         executor.walk = {"state": "success"}
         monkeypatch.setattr(gateway, "EAR_AFTER_BLOCKED_S", 0.0)
         assert executor.hung_up.wait(5), "the walk over, the mic is let go"
+
+
+# --------------------------------------------------------------------------- #
+# Modes: the page says who answers (vlm | agent); walking is always the agent's; said out loud
+# --------------------------------------------------------------------------- #
+def spoken(iacore, timeout=3.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        said = [b["text"] for p, b in iacore.asked if p == "/speak"]
+        if said:
+            return said
+        time.sleep(0.02)
+    return []
+
+
+def test_in_vlm_mode_the_page_answers_and_the_robot_says_the_mode(executor, iacore, bender_ear):
+    with TestClient(gateway.app) as tc, \
+            tc.websocket_connect("/ws/robot-ear?robot=g1&mode=vlm") as ws:
+        assert recv(ws, skip=()) == {"type": "listening", "robot": "g1"}
+        assert recv(ws, skip=()) == {"type": "mode", "mode": "vlm"}
+        cmd = recv(ws)
+        assert cmd == {"type": "command", "text": "no podés pasar, date la vuelta", "to": "page"}
+        assert spoken(iacore) == ["Modo VLM."]
+    assert not [p for p, _b in iacore.asked if p == "/agent"], "the agent is not asked"
+
+
+def test_a_page_can_change_the_mode_and_the_robot_says_it(executor, iacore, quiet_ears):
+    with TestClient(gateway.app) as tc, \
+            tc.websocket_connect("/ws/robot-ear?robot=g1&mode=vlm") as ws:
+        recv(ws)
+        ws.send_text(json.dumps({"type": "mode", "mode": "agent"}))
+        assert recv(ws, skip=("listening",)) == {"type": "mode", "mode": "vlm"}
+        assert recv(ws, skip=("listening",)) == {"type": "mode", "mode": "agent"}
+        deadline = time.time() + 3
+        while len(spoken(iacore)) < 2 and time.time() < deadline:
+            time.sleep(0.02)
+        assert spoken(iacore) == ["Modo VLM.", "Modo agente."]
+
+
+def test_walking_is_always_the_agents_even_with_the_mic_in_vlm(executor, iacore, bender_ear,
+                                                                monkeypatch):
+    executor.walk = {"state": "running", "blocked": None}
+    monkeypatch.setattr(gateway, "WALK_WATCH_S", 0.05)
+    with TestClient(gateway.app) as tc:
+        deadline = time.time() + 3
+        while not gateway._ear_for("g1").walking and time.time() < deadline:
+            time.sleep(0.02)
+        with tc.websocket_connect("/ws/robot-ear?robot=g1&mode=vlm") as ws:
+            assert recv(ws, skip=()) == {"type": "listening", "robot": "g1"}
+            assert recv(ws, skip=()) == {"type": "mode", "mode": "agent"}
+            cmd = recv(ws)
+            assert cmd["to"] == "agent"
+            agent_events(ws)
+    assert "Modo agente." in spoken(iacore)
+    asked = [b["text"] for p, b in iacore.asked if p == "/agent"]
+    assert asked and "walking somewhere" in asked[-1]
