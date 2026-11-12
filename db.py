@@ -29,6 +29,7 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    Text,
     TypeDecorator,
     UniqueConstraint,
     event,
@@ -285,8 +286,9 @@ class Robot(Base):
 
 
 class Chat(Base):
-    """One conversation with the vision assistant (Live). Private to the person who had it:
-    no role, not even an owner's, reads another person's chats."""
+    """One conversation with the vision assistant (Live, kind "vlm") or with the agent (the
+    Agent page, kind "agent"). Private to the person who had it: no role, not even an owner's,
+    reads another person's chats."""
 
     __tablename__ = "chats"
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
@@ -297,13 +299,16 @@ class Chat(Base):
         String(32), ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
     title: Mapped[str] = mapped_column(String(120), default="")
+    kind: Mapped[str] = mapped_column(String(16), default="vlm")    # "vlm" | "agent"
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
 
 class ChatMessage(Base):
-    """One exchange in a chat: what was asked — a question, or a scan for objects — and what
-    came back, with the robot it was about."""
+    """One exchange in a chat: what was asked — a question, a scan for objects, or an
+    instruction to the agent — and what came back, with the robot it was about. An agent's
+    exchange also keeps its trace (what it understood, its plan, each tool and its steps) as
+    the page drew it, so reopening the conversation shows it the same."""
 
     __tablename__ = "chat_messages"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -311,11 +316,12 @@ class ChatMessage(Base):
         String(32), ForeignKey("chats.id", ondelete="CASCADE"), index=True
     )
     at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
-    kind: Mapped[str] = mapped_column(String(16))        # "question" | "analysis"
+    kind: Mapped[str] = mapped_column(String(16))        # "question" | "analysis" | "agent"
     question: Mapped[str] = mapped_column(String(4000))
     answer: Mapped[str] = mapped_column(String(20000))
     status: Mapped[str] = mapped_column(String(300), default="")
     robot: Mapped[str] = mapped_column(String(16), default="")
+    trace: Mapped[str | None] = mapped_column(Text, nullable=True)    # JSON, agent only
 
 
 class Memory(Base):
