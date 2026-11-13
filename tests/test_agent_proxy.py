@@ -26,7 +26,7 @@ class FakeIacore(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(n)
         self.server.asked.append((self.path, json.loads(body or b"{}")))
-        if self.path == "/agent/stop":
+        if self.path == "/agent/stop" or self.path.startswith(("/walk/control", "/execute")):
             out = b'{"ok": true}'
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -60,6 +60,8 @@ def iacore(monkeypatch):
     srv.asked, srv.busy = [], False
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     monkeypatch.setattr(gateway, "IACORE_URL", f"http://127.0.0.1:{srv.server_address[1]}")
+    # The same server stands in for the executor: STOP reaches it too.
+    monkeypatch.setattr(gateway, "EXECUTOR_URL", f"http://127.0.0.1:{srv.server_address[1]}")
     with TestClient(gateway.app) as tc:
         yield tc, srv
     srv.shutdown()
@@ -96,10 +98,22 @@ def test_iacore_down_is_an_error_in_the_trace(monkeypatch):
     assert _events(body)[0]["type"] == "error" and "unreachable" in _events(body)[0]["text"]
 
 
-def test_stop_reaches_iacore(iacore):
+def test_stop_stops_everything_at_once(iacore):
+    """2026-11-13, "tiene que parar todo el stop": the run, the walk on the robot (whoever
+    started it) and the robot itself — not only the run, which cancelled the walk later."""
     tc, srv = iacore
     assert tc.post("/api/agent/stop").json() == {"ok": True}
-    assert srv.asked[-1][0] == "/agent/stop"
+    asked = {path: body for path, body in srv.asked}
+    assert "/agent/stop" in asked
+    assert asked["/walk/control?robot=g1"] == {"op": "cancel"}
+    assert asked["/execute"] == {"robot": "g1", "skill": "stop", "params": {}, "safe_mode": True}
+
+
+def test_stop_still_ends_the_run_when_the_executor_is_down(iacore, monkeypatch):
+    tc, srv = iacore
+    monkeypatch.setattr(gateway, "EXECUTOR_URL", "http://127.0.0.1:9")
+    assert tc.post("/api/agent/stop").json() == {"ok": True}
+    assert [p for p, _b in srv.asked] == ["/agent/stop"]
 
 
 def test_an_empty_instruction_is_refused(iacore):

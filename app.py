@@ -578,8 +578,28 @@ def _sse(event: dict) -> bytes:
 
 @app.post("/api/agent/stop")
 async def agent_stop():
-    """STOP for the /agent tab: iacore ends the run and takes the arm home before letting go."""
-    return await proxy_json(client.post("/agent/stop"))
+    """STOP for the /agent tab, and it stops EVERYTHING, at once ("tiene que parar todo el
+    stop", 2026-11-13): iacore ends the run and takes the arm home before letting go, the walk
+    is cancelled on the robot (Nav2's, the relay's own or one from the Navigation page) and the
+    robot is told to stop. Before, only the run was told, and it cancelled the walk on its next
+    look — or never, with no run going."""
+    agent, _walk, _halt = await asyncio.gather(
+        proxy_json(client.post("/agent/stop")),
+        _walk_control(AGENT_ROBOT, "cancel"),
+        _robot_stop(AGENT_ROBOT))
+    return agent
+
+
+async def _robot_stop(robot: str) -> dict:
+    """The executor's "stop" skill (zero velocity) for `robot`; {} when it cannot be reached."""
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(3.0)) as sc:
+            r = await sc.post(f"{EXECUTOR_URL}/execute", json={
+                "robot": robot, "skill": "stop", "params": {}, "safe_mode": True})
+        out = r.json()
+        return out if isinstance(out, dict) else {}
+    except Exception:
+        return {}
 
 
 @app.get("/api/robot-net")
